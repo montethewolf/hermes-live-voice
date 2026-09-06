@@ -1,3 +1,5 @@
+import { VoiceStateStore } from '../../../application/brainstorm/voice-state.js';
+import { RepositoryRegistry } from '../../../application/brainstorm/repository-registry.js';
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -42,6 +44,9 @@ export interface StartServerOptions {
   hermes?: HermesRunsPort;
   liveModel?: LiveModelAdapter;
   taskSupervisor?: TaskSupervisorRuntime;
+  voiceStore?: VoiceStateStore;
+  repositories?: RepositoryRegistry;
+  researchHermes?: HermesRunsPort;
   signal?: AbortSignal;
 }
 
@@ -57,6 +62,7 @@ export async function startServer({
   hermes: providedHermes,
   liveModel: providedLiveModel,
   taskSupervisor: providedTaskSupervisor,
+  voiceStore: providedVoiceStore, repositories: providedRepositories, researchHermes: providedResearchHermes,
   signal,
 }: StartServerOptions): Promise<{
   close(): Promise<void>;
@@ -71,6 +77,16 @@ export async function startServer({
   }
   const hermes = providedHermes ?? new HermesClient(config.hermes);
   const liveModel = providedLiveModel ?? createLiveModelAdapter(config);
+  const voiceStore = providedVoiceStore ?? new VoiceStateStore(process.env.HERMES_LIVE_VOICE_STATE_FILE ?? `${dirname(config.tasks.stateFile)}/voice-state.json`);
+  const repositories = providedRepositories ?? new RepositoryRegistry(process.env.HERMES_LIVE_REPOSITORY_REGISTRY ?? `${dirname(config.tasks.stateFile)}/repositories.json`,
+    process.env.HERMES_LIVE_REPOSITORY_ROOTS ? JSON.parse(process.env.HERMES_LIVE_REPOSITORY_ROOTS) : undefined,
+    process.env.HERMES_LIVE_RESEARCH_PYTHON ?? 'python3');
+  const researchUrl = process.env.HERMES_LIVE_RESEARCH_URL;
+  const researchToken = process.env.HERMES_LIVE_RESEARCH_API_KEY;
+  if (researchUrl && (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(researchUrl).hostname) || researchUrl === config.hermes.baseUrl || !researchToken)) {
+    throw new Error('Research requires a separate authenticated loopback backend');
+  }
+  const researchHermes = providedResearchHermes ?? (researchUrl && researchToken ? new HermesClient({ ...config.hermes, baseUrl: researchUrl, apiKey: researchToken, instructions: undefined }) : undefined);
   const taskSupervisor = providedTaskSupervisor ?? new TaskSupervisor({
     store: new FileTaskStore({
       directory: dirname(config.tasks.stateFile),
@@ -80,6 +96,8 @@ export async function startServer({
       terminalReserveSlots: config.tasks.maxConcurrent,
     }),
     hermes,
+    researchHermes,
+    onRecord: record => voiceStore.retainResearch(record),
     maxConcurrent: config.tasks.maxConcurrent,
     trustDeclaredReadOnly: config.tasks.trustDeclaredReadOnly === true,
     maxQueued: config.tasks.maxQueued,
@@ -183,6 +201,7 @@ export async function startServer({
       const session = new LiveGatewaySession(new WebSocketClientConnection(ws), {
         config,
         hermes,
+        voiceStore, repositories, researchAvailable: Boolean(researchHermes),
         liveModel,
         taskSupervisor,
         logger,
@@ -461,6 +480,9 @@ async function handleHttp(
         huggingface_local: options.config.realtime.provider === "local",
         gemini_live: options.config.realtime.provider === "gemini",
         openai_realtime: options.config.realtime.provider === "openai",
+        brainstorm: options.config.realtime.provider === "openai",
+        discussion_memory: true,
+        playback_state: true,
         mock_live: options.config.realtime.provider === "mock",
         hermes_runs: true,
         hermes_conversations: true,

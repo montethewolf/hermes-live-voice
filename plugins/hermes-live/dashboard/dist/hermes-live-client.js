@@ -71,10 +71,10 @@ const TASK_STOP_RESPONSE_TYPES = new Set([
   "task.unknown",
 ]);
 const OPEN = 1;
-export const HERMES_LIVE_PROTOCOL_VERSION = 6;
+export const HERMES_LIVE_PROTOCOL_VERSION = 7;
 
 const KNOWN_SERVER_MESSAGE_TYPES = new Set([
-  "session.ready",
+  "session.ready", "session.mode.changed", "session.context.changed",
   "session.error",
   "audio.output",
   "transcript.delta",
@@ -144,6 +144,8 @@ export class HermesLiveClient {
     this.configuredUrl = options.url ? normalizeGatewayWebSocketUrl(options.url) : undefined;
     this.webSocketUrlProvider = options.webSocketUrlProvider;
     this.#tokenProvider = options.token;
+    this.protocolVersion = options.protocolVersion ?? HERMES_LIVE_PROTOCOL_VERSION;
+    this.discussionId = options.discussionId ? requireClientId(options.discussionId, 'discussionId') : undefined;
     this.profileId = optionalString(options.profileId);
     this.userLabel = optionalString(options.userLabel);
     this.conversation = normalizeConversationSelection(options.conversation ?? { mode: "new" });
@@ -292,7 +294,8 @@ export class HermesLiveClient {
           this.sendRaw({
             type: "session.start",
             id: requestId,
-            protocolVersion: HERMES_LIVE_PROTOCOL_VERSION,
+            protocolVersion: this.protocolVersion,
+            ...(this.protocolVersion >= 7 && this.discussionId ? { discussionId: this.discussionId } : {}),
             ...(this.profileId ? { profileId: this.profileId } : {}),
             ...(this.userLabel ? { userLabel: this.userLabel } : {}),
             conversation,
@@ -449,6 +452,49 @@ export class HermesLiveClient {
         "The gateway closed abnormally and did not confirm session detach. Verify background task state after reconnecting.",
       );
     }
+  }
+
+  controlRequest(type, fields, options = {}) {
+    if (this.session?.protocolVersion < 7 || !this.session?.brainstormSupported) return Promise.reject(new Error('Mode controls are unsupported by this gateway/provider; v7 OpenAI is required.'));
+    const id = options.id ?? this.createRequestId();
+    return new Promise((resolve, reject) => {
+      const unsubscribers = [];
+      let settled = false;
+      const finish = (error, value) => {
+        if (settled) return; settled = true;
+        clearTimeout(timer); this.pendingRequests.delete(id);
+        for (const unsubscribe of unsubscribers) unsubscribe();
+        error ? reject(error) : resolve(value);
+      };
+      const listeners = [
+        ['request.succeeded', e => { if (e.requestId === id) finish(null, e.response); }],
+        ['request.failed', e => { if (e.requestId === id) finish(new Error(e.error.message)); }],
+        ['close', () => finish(new Error('Voice connection closed during control request'))],
+      ];
+      const timer = setTimeout(() => finish(new Error('Mode/context confirmation timed out; inspect current mode before retrying work.')), options.timeoutMs ?? 12000);
+      for (const [name, fn] of listeners) unsubscribers.push(this.on(name, fn));
+      try { this.sendCorrelated({ type, id, ...fields }, { type }); }
+      catch (error) { finish(error); }
+    });
+  }
+
+  setMode(interactionMode, options = {}) {
+    if (interactionMode !== undefined && !['work', 'brainstorm'].includes(interactionMode)) return Promise.reject(new TypeError('Invalid interaction mode'));
+    return this.controlRequest('session.mode.set', { ...(interactionMode ? { interactionMode } : {}), ...(options.project ? { project: options.project } : {}) }, options);
+  }
+
+  setDiscussion(discussionId, conversation, options = {}) {
+    return this.controlRequest('session.context.set', { discussionId: requireClientId(discussionId, 'discussionId'), conversation: normalizeConversationSelection(conversation) }, options);
+  }
+
+  reportPlayback(active, microphoneActive = false) {
+    if (this.session?.protocolVersion >= 7) this.send({ type: 'playback.state', active: Boolean(active), microphoneActive: Boolean(microphoneActive) });
+  }
+
+  sendContext(text) {
+    const id = this.createRequestId();
+    this.send({ type: 'context.input', id, text: String(text).slice(0, 20000) });
+    return id;
   }
 
   sendText(text, options = {}) {
@@ -661,6 +707,20 @@ export class HermesLiveClient {
         this.setState("ready");
         this.updateSnapshot({ session: message, lastError: undefined });
         break;
+      case 'session.mode.changed':
+      case 'session.context.changed': {
+        const { type: _type, requestId, ...fields } = message;
+        this.session = { ...this.session, ...fields };
+        this.discussionId = message.discussionId;
+        if (message.conversation?.sessionId) this.conversation = { mode: 'resume', sessionId: message.conversation.sessionId };
+        this.updateSnapshot({ session: this.session });
+        if (requestId && this.pendingRequests.has(requestId)) {
+          const pending = this.requirePendingRequest(requestId, message.type === 'session.mode.changed' ? 'session.mode.set' : 'session.context.set');
+          this.pendingRequests.delete(requestId);
+          this.emitter.emit('request.succeeded', { requestId, request: pending, response: message });
+        }
+        break;
+      }
       case "task.snapshot":
         applied = this.acceptTaskSnapshot(message);
         break;
@@ -1571,12 +1631,31 @@ export function validateServerMessage(value) {
   }
   const message = value;
   switch (message.type) {
+    case 'session.mode.changed':
+      requireOnlyKeys(message, ['type', 'requestId', 'interactionMode', 'discussionId', 'brainstormSupported', 'project', 'investigation', 'ongoingWork']);
+      optionalOpaqueId(message, 'requestId', 128);
+      requireOpaqueId(message, 'discussionId');
+      if (!['work', 'brainstorm'].includes(message.interactionMode) || typeof message.brainstormSupported !== 'boolean') throw new TypeError('Invalid mode confirmation');
+      optionalBoundedStringField(message, 'project', 256);
+      optionalOpaqueId(message, 'investigation', 256);
+      requireInteger(message, 'ongoingWork', { minimum: 0 });
+      break;
+    case 'session.context.changed':
+      requireOnlyKeys(message, ['type', 'requestId', 'discussionId', 'conversation']);
+      requireOpaqueId(message, 'requestId', 128); requireOpaqueId(message, 'discussionId');
+      validatePublicConversation(message.conversation);
+      break;
     case "session.ready": {
-      requireOnlyKeys(message, ["type", "protocolVersion", "requestId", "sessionId", "model", "hermes", "realtime", "tasks", "conversation"]);
+      requireOnlyKeys(message, ["type", "protocolVersion", "requestId", "sessionId", "model", "hermes", "realtime", "tasks", "conversation", "interactionMode", "discussionId", "brainstormSupported"]);
+      if (message.protocolVersion >= 7) {
+        if (!['work', 'brainstorm'].includes(message.interactionMode)) throw new TypeError('Invalid interaction mode');
+        requireOpaqueId(message, 'discussionId');
+        if (typeof message.brainstormSupported !== 'boolean') throw new TypeError('Missing mode capability');
+      }
       requireInteger(message, "protocolVersion", { positive: true, maximum: 1_000 });
-      if (message.protocolVersion !== HERMES_LIVE_PROTOCOL_VERSION) {
+      if (![6, 7].includes(message.protocolVersion)) {
         throw new TypeError(
-          `Hermes Live protocol version ${message.protocolVersion} is not supported by this protocol v6 client. Upgrade the gateway and client together.`,
+          `Hermes Live protocol version ${message.protocolVersion} is not supported by this protocol v7 client. Upgrade the gateway and client together.`,
         );
       }
       optionalOpaqueId(message, "requestId", 128);
@@ -1735,7 +1814,7 @@ export function validateServerMessage(value) {
     default:
       if (message.type.startsWith("run.")) {
         throw new TypeError(
-          `Hermes Live received legacy protocol v2 message ${message.type}; this protocol v6 client accepts task.* lifecycle messages only.`,
+          `Hermes Live received legacy protocol v2 message ${message.type}; this protocol v7 client accepts task.* lifecycle messages only.`,
         );
       }
   }

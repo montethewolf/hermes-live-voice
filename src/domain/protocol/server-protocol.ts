@@ -213,7 +213,7 @@ const TaskEventBase = {
 const SessionReadyMessageSchema = z
   .object({
     type: z.literal("session.ready"),
-    protocolVersion: z.union([z.literal(3), z.literal(4), z.literal(5), z.literal(6)]),
+    protocolVersion: z.union([z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7)]),
     requestId: RequestIdSchema.optional(),
     sessionId: PublicIdSchema,
     model: z.string().min(1).max(PUBLIC_MODEL_MAX_CHARS),
@@ -226,6 +226,9 @@ const SessionReadyMessageSchema = z
     realtime: RealtimeClientCapabilitiesSchema,
     tasks: TaskCapabilitiesSchema,
     conversation: PublicConversationSchema.optional(),
+    interactionMode: z.enum(['work', 'brainstorm']).optional(),
+    discussionId: PublicIdSchema.optional(),
+    brainstormSupported: z.boolean().optional(),
   })
   .strict();
 
@@ -399,6 +402,12 @@ const LogMessageSchema = z
 
 export const ServerMessageSchema = z.union([
   SessionReadyMessageSchema,
+  z.object({ type: z.literal('session.mode.changed'), requestId: RequestIdSchema.optional(),
+    interactionMode: z.enum(['work', 'brainstorm']), discussionId: PublicIdSchema,
+    project: z.string().max(256).optional(), investigation: z.string().max(256).optional(),
+    brainstormSupported: z.boolean(), ongoingWork: z.number().int().nonnegative() }).strict(),
+  z.object({ type: z.literal('session.context.changed'), requestId: RequestIdSchema,
+    discussionId: PublicIdSchema, conversation: PublicConversationSchema }).strict(),
   SessionErrorMessageSchema,
   AudioOutputMessageSchema,
   TranscriptDeltaMessageSchema,

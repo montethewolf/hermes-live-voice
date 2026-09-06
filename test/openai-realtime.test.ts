@@ -2341,3 +2341,40 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void; reject(e
   });
   return { promise, resolve, reject };
 }
+
+
+describe('OpenAI mode and labelled context updates', () => {
+  it('waits for the effective configuration and inserts context without a synthetic user turn or speech', async () => {
+    const h = await createOpenAITestHarness();
+    try {
+      let settled = false;
+      const updated = h.session.updateConfiguration!('Brainstorm instructions', ['set_conversation_mode']).then(() => { settled = true; });
+      await vi.waitFor(() => expect(h.clientMessages.filter(m => m.type === 'session.update')).toHaveLength(2));
+      expect(settled).toBe(false);
+      const sent = h.clientMessages.at(-1);
+      h.upstream.send(JSON.stringify({ type: 'session.updated', session: sent.session }));
+      await updated;
+      const context = h.session.insertContext!('discussion:one', 'Saved notes');
+      await vi.waitFor(() => expect(h.clientMessages.at(-1).type).toBe('conversation.item.create'));
+      const item = h.clientMessages.at(-1).item;
+      expect(item.role).toBe('system');
+      expect(item.id.length).toBeLessThanOrEqual(32);
+      h.upstream.send(JSON.stringify({ type: 'conversation.item.created', item }));
+      await context;
+      expect(openAIResponseCreates(h.clientMessages)).toHaveLength(0);
+      expect(h.clientMessages.some(m => m.item?.role === 'user')).toBe(false);
+    } finally { await h.close(); }
+  });
+  it('rejects correlated configuration errors and retains the existing conversation', async () => {
+    const h = await createOpenAITestHarness();
+    try {
+      const result = h.session.updateConfiguration!('Rejected', ['set_conversation_mode']);
+      const rejection = expect(result).rejects.toThrow('rejected');
+      await vi.waitFor(() => expect(h.clientMessages.filter(m => m.type === 'session.update')).toHaveLength(2));
+      h.upstream.send(JSON.stringify({ type: 'error', error: { event_id: h.clientMessages.at(-1).event_id, message: 'Invalid' } }));
+      await rejection;
+      expect(h.upstream.readyState).toBe(WebSocket.OPEN);
+      expect(openAIResponseCreates(h.clientMessages)).toHaveLength(0);
+    } finally { await h.close(); }
+  });
+});

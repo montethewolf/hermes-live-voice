@@ -7,7 +7,7 @@ export type HermesLiveClientState =
   | "closed"
   | "failed";
 
-export const HERMES_LIVE_PROTOCOL_VERSION: 6;
+export const HERMES_LIVE_PROTOCOL_VERSION: 7;
 
 export type HermesLiveConversationSelection =
   | { mode: "new"; title?: string }
@@ -102,7 +102,10 @@ export interface HermesLiveTaskCapabilities {
 
 export interface HermesLiveSessionReady {
   type: "session.ready";
-  protocolVersion: 6;
+  protocolVersion: 6 | 7;
+  interactionMode?: 'work' | 'brainstorm';
+  discussionId?: string;
+  brainstormSupported?: boolean;
   requestId?: string;
   sessionId: string;
   model: string;
@@ -133,6 +136,8 @@ export interface HermesLiveTaskEventBase {
 }
 
 export type HermesLiveKnownServerMessage =
+  | HermesLiveModeChanged
+  | HermesLiveContextChanged
   | HermesLiveSessionReady
   | { type: "session.error"; code: string; message: string; requestId?: string; recoverable?: boolean }
   | { type: "audio.output"; data: string; mimeType: string; itemId?: string; contentIndex?: number }
@@ -171,6 +176,8 @@ export type HermesLiveUnknownServerMessage = Record<string, unknown> & { type: s
 export type HermesLiveServerMessage = HermesLiveKnownServerMessage | HermesLiveUnknownServerMessage;
 
 export interface HermesLiveClientOptions {
+  protocolVersion?: 6 | 7;
+  discussionId?: string;
   url?: string | URL;
   webSocketUrlProvider?: () => string | URL | Promise<string | URL>;
   token?: string | (() => string | undefined | Promise<string | undefined>);
@@ -209,6 +216,8 @@ export type HermesLivePendingRequest =
   | { type: "task.notification.ack"; taskId: string; notificationId: string };
 
 export interface HermesLiveClientEventMap {
+  'session.mode.changed': HermesLiveModeChanged;
+  'session.context.changed': HermesLiveContextChanged;
   state: { state: HermesLiveClientState; previous: HermesLiveClientState };
   statechange: { state: HermesLiveClientState; previous: HermesLiveClientState };
   snapshot: HermesLiveSnapshot;
@@ -262,6 +271,10 @@ export class HermesLiveClient {
   getSnapshot(): HermesLiveSnapshot;
   connect(options?: { signal?: AbortSignal; conversation?: HermesLiveConversationSelection }): Promise<HermesLiveSessionReady>;
   disconnect(reason?: string): Promise<void>;
+  setMode(mode?: 'work' | 'brainstorm', options?: { id?: string; project?: string; timeoutMs?: number }): Promise<HermesLiveModeChanged>;
+  setDiscussion(discussionId: string, conversation: HermesLiveConversationSelection, options?: { id?: string; timeoutMs?: number }): Promise<HermesLiveContextChanged>;
+  reportPlayback(active: boolean, microphoneActive?: boolean): void;
+  sendContext(text: string): string;
   sendText(text: string, options?: { id?: string }): string;
   sendAudio(data: string | ArrayBuffer | ArrayBufferView, mimeType?: string, options?: { id?: string }): string | undefined;
   endAudio(options?: { id?: string }): string;
@@ -323,3 +336,11 @@ export function normalizeGatewayWebSocketUrl(value: string | URL): string;
 export function buildGatewayWebSocketUrl(baseUrl: string | URL, token?: string): URL;
 export function arrayBufferToBase64(value: ArrayBuffer | ArrayBufferView): string;
 export function validateServerMessage(value: unknown): HermesLiveServerMessage;
+
+export interface HermesLiveModeChanged {
+  type: 'session.mode.changed'; requestId?: string; interactionMode: 'work' | 'brainstorm'; discussionId: string;
+  brainstormSupported: boolean; project?: string; investigation?: string; ongoingWork: number;
+}
+export interface HermesLiveContextChanged {
+  type: 'session.context.changed'; requestId: string; discussionId: string; conversation: HermesLiveSessionReady['conversation'];
+}

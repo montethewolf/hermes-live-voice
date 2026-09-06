@@ -1,3 +1,4 @@
+import { RepositoryRegistry } from '../src/application/brainstorm/repository-registry.js';
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1993,9 +1994,12 @@ async function startTestServer(options: {
   hermes: HermesRunsPort;
   provider: LiveModelAdapter;
   logger?: Logger;
+  researchHermes?: HermesRunsPort;
 }): Promise<TestServer> {
   const server = await startServer({
     config: options.config,
+    repositories: new RepositoryRegistry(join(dirname(options.config.tasks.stateFile), "repositories.json"), []),
+    researchHermes: options.researchHermes,
     hermes: options.hermes,
     liveModel: options.provider,
     logger: options.logger ?? fakeLogger(),
@@ -2024,7 +2028,7 @@ async function readyClient(
   options: {
     profileId?: string;
     userLabel?: string;
-    protocolVersion?: 3 | 4 | 5 | 6;
+    protocolVersion?: 3 | 4 | 5 | 6 | 7;
     expectedSnapshotReason?: "initial" | "reconnect";
   } = {},
 ): Promise<{
@@ -2299,6 +2303,16 @@ class RecordingLiveSession implements LiveModelSession {
   readonly textInputs: string[] = [];
   readonly audioInputs: LiveModelAudio[] = [];
   readonly cancelCalls: Array<{ reason?: string; truncate?: unknown }> = [];
+  readonly configurations: Array<{ instructions: string; tools: readonly string[] }> = [];
+  readonly contexts: Array<{ label: string; text: string }> = [];
+  contextResponses = 0;
+  configurationError = false;
+  async updateConfiguration(instructions: string, tools: readonly import('../src/application/live-gateway/ports/realtime-model.port.js').LiveToolName[]) {
+    if (this.configurationError) throw new Error('Provider rejected configuration');
+    this.configurations.push({ instructions, tools });
+  }
+  async insertContext(label: string, text: string) { this.contexts.push({ label, text }); }
+  async requestContextResponse() { this.contextResponses++; }
   closeCalls = 0;
   textBehavior?: (text: string) => Promise<void>;
   notificationBehavior?: (notification: LiveTaskNotification) => Promise<void>;
@@ -2700,3 +2714,130 @@ function deferred<T>(): {
   };
   return result;
 }
+
+
+describe('Monte v7 modes', () => {
+  async function setup(research = false) {
+    const config = testConfig(); config.realtime.provider = 'openai';
+    const hermes = new HermesHarness(), researcher = new HermesHarness(), provider = new RecordingLiveAdapter();
+    writeFileSync(join(dirname(config.tasks.stateFile), 'repositories.json'), JSON.stringify({ version: 1, projects: [{ id: 'repo_0123456789abcdef', name: 'test-project', path: dirname(config.tasks.stateFile) }] }));
+    const server = await startTestServer({ config, hermes, provider, ...(research ? { researchHermes: researcher } : {}) });
+    const client = await connectClient(server.url);
+    send(client.socket, { type: 'session.start', id: 'start', protocolVersion: 7, discussionId: 'discussion_a', conversation: { mode: 'new' } });
+    const ready = await client.messages.wait('session.ready');
+    expect(ready).toMatchObject({ interactionMode: 'work', brainstormSupported: true, discussionId: 'discussion_a' });
+    return { config, hermes, researcher, provider, server, client, ready };
+  }
+  const mode = async (client: Awaited<ReturnType<typeof connectClient>>, interactionMode: string, id: string) => {
+    send(client.socket, { type: 'session.mode.set', id, interactionMode });
+    return client.messages.wait('session.mode.changed', m => m.requestId === id);
+  };
+  it('switches independently of four pending Work calls, preserves connection, and blocks new execution', async () => {
+    const { hermes, provider, client } = await setup();
+    const gate = deferred<HermesSessionChatResult>();
+    hermes.chatBehavior = () => gate.promise;
+    for (let i = 0; i < 4; i++) provider.emit({ type: 'tool_call', call: { id: `slow_${i}`, name: 'continue_hermes_conversation', args: { message: 'Existing accepted work' } } });
+    await waitUntil(() => hermes.chatCalls.length === 1);
+    const changed = await mode(client, 'brainstorm', 'brain');
+    expect(changed.interactionMode).toBe('brainstorm');
+    expect(changed.ongoingWork).toBe(4);
+    expect(provider.connections).toHaveLength(1);
+    expect(provider.latest.configurations.at(-1)?.tools).not.toContain('start_background_task');
+    provider.emit({ type: 'tool_call', call: backgroundTaskCall('blocked', 'Could we implement it differently?') });
+    // Work queue is occupied; mode control still responds immediately.
+    provider.emit({ type: 'tool_call', call: { id: 'inspect', name: 'set_conversation_mode', args: {} } });
+    expect((await provider.latest.toolResponses.wait(v => v.call.id === 'inspect')).response.interactionMode).toBe('brainstorm');
+    gate.resolve({ sessionId: 'session_1', content: 'Accepted work completed' });
+    expect((await provider.latest.toolResponses.wait(v => v.call.id === 'blocked')).response.ok).toBe(false);
+    expect(hermes.startCalls).toHaveLength(0);
+  });
+  it('failed switches dispatch nothing; successful explicit handoff submits once even after replay', async () => {
+    const { hermes, provider, client } = await setup();
+    await mode(client, 'brainstorm', 'brain');
+    provider.emit({ type: 'text', speaker: 'user', text: 'Use option B, with no schema changes.', final: true });
+    provider.emit({ type: 'tool_call', call: { id: 'notes', name: 'update_discussion_notes', args: { decisions: 'Option B', decision_evidence: 'Use option B', constraints: 'No schema changes' } } });
+    expect((await provider.latest.toolResponses.wait(v => v.call.id === 'notes')).response.ok).toBe(true);
+    provider.latest.configurationError = true;
+    send(client.socket, { type: 'session.mode.set', id: 'fail', interactionMode: 'work' });
+    await client.messages.wait('session.error', m => m.requestId === 'fail');
+    provider.emit({ type: 'tool_call', call: backgroundTaskCall('denied', 'Implement option B') });
+    expect((await provider.latest.toolResponses.wait(v => v.call.id === 'denied')).response.ok).toBe(false);
+    expect(hermes.startCalls).toHaveLength(0);
+    provider.latest.configurationError = false;
+    await mode(client, 'work', 'work');
+    expect(hermes.startCalls).toHaveLength(0);
+    const call = backgroundTaskCall('implement', 'Implement option B');
+    provider.emit({ type: 'tool_call', call });
+    await provider.latest.toolResponses.wait(v => v.call.id === 'implement');
+    provider.emit({ type: 'tool_call', call });
+    await waitUntil(() => hermes.startCalls.length === 1);
+    expect(hermes.startCalls[0].input).toContain('No schema changes');
+    expect(hermes.startCalls[0].input).toContain('User acceptance: Use option B');
+    expect(hermes.startCalls).toHaveLength(1);
+  });
+  it('attaches agreed context to provider and client task follow-ups', async () => {
+    const { config, hermes, provider, client } = await setup();
+    provider.emit({ type: 'tool_call', call: { id: 'scope', name: 'update_discussion_notes', args: { constraints: 'Keep the storage schema' } } });
+    await provider.latest.toolResponses.wait(v => v.call.id === 'scope');
+    provider.emit({ type: 'tool_call', call: backgroundTaskCall('parent', 'Initial work') });
+    const parent = String((await provider.latest.toolResponses.wait(v => v.call.id === 'parent')).response.task_id);
+    await waitUntil(() => hermes.startCalls.length === 1);
+    hermes.pushEvent('run_1', { event: 'run.completed', run_id: 'run_1', output: 'Initial work completed' });
+    await waitForStoredTask(config.tasks.stateFile, parent, 'completed');
+    provider.emit({ type: 'tool_call', call: { id: 'follow', name: 'follow_up_background_task', args: { task_id: parent, message: 'Implement the follow-up' } } });
+    const follow = (await provider.latest.toolResponses.wait(v => v.call.id === 'follow')).response;
+    expect(follow.ok).toBe(true);
+    expect(storedTask(config.tasks.stateFile, String(follow.task_id))?.input).toContain('Keep the storage schema');
+    send(client.socket, { type: 'task.follow_up', id: 'client_follow', taskId: parent, message: 'Implement another follow-up' });
+    await waitUntil(() => client.messages.observed.some(m => m.requestId === 'client_follow'));
+    const response = client.messages.observed.find(m => m.requestId === 'client_follow')!;
+    expect(storedTask(config.tasks.stateFile, response.taskId)?.input).toContain('Keep the storage schema');
+  });
+  it('restores mode and notes on reconnect; focus changes context without reconnecting the provider', async () => {
+    const { hermes, provider, client, server } = await setup();
+    await mode(client, 'brainstorm', 'brain');
+    provider.emit({ type: 'tool_call', call: { id: 'notes', name: 'update_discussion_notes', args: { goals: 'Design a reconnect-safe system' } } });
+    await provider.latest.toolResponses.wait(v => v.call.id === 'notes');
+    hermes.sessions.set('focused-tip', { id: 'focused-tip' });
+    send(client.socket, { type: 'session.context.set', id: 'focus', discussionId: 'discord:thread', conversation: { mode: 'resume', sessionId: 'focused-tip' } });
+    const changed = await client.messages.wait('session.context.changed');
+    expect(changed.conversation.sessionId).toBe('focused-tip');
+    expect(provider.connections).toHaveLength(1);
+    expect(provider.latest.contexts.at(-1)?.text).not.toContain('Design a reconnect-safe system');
+    client.socket.close();
+    const reconnected = await connectClient(server.url);
+    send(reconnected.socket, { type: 'session.start', id: 'reconnect', protocolVersion: 7, discussionId: 'discussion_a', conversation: { mode: 'resume', sessionId: 'session_1' } });
+    expect((await reconnected.messages.wait('session.ready')).interactionMode).toBe('brainstorm');
+    expect(provider.latest.contexts.at(-1)?.text).toContain('Design a reconnect-safe system');
+  });
+  it('keeps five exchanges moving during one investigation and introduces its findings after playback and microphone idle', async () => {
+    const { researcher, hermes, provider, client } = await setup(true);
+    send(client.socket, { type: 'session.mode.set', id: 'brain', interactionMode: 'brainstorm', project: 'test project' });
+    await client.messages.wait('session.mode.changed', m => m.requestId === 'brain');
+    provider.emit({ type: 'tool_call', call: { id: 'research1', name: 'consult_hermes', args: { question: 'Where is cancellation handled?' } } });
+    const receipt = (await provider.latest.toolResponses.wait(v => v.call.id === 'research1')).response;
+    expect(receipt.ok).toBe(true);
+    await waitUntil(() => researcher.startCalls.length === 1);
+    provider.emit({ type: 'tool_call', call: { id: 'research2', name: 'consult_hermes', args: { question: 'Where is cancellation handled?' } } });
+    expect((await provider.latest.toolResponses.wait(v => v.call.id === 'research2')).response.receipt).toBe(receipt.receipt);
+    for (let i = 0; i < 5; i++) {
+      send(client.socket, { type: 'text.input', text: `Design exchange ${i}` });
+      await waitUntil(() => provider.latest.textInputs.length === i + 1);
+      provider.emit({ type: 'text', speaker: 'user', text: `Design exchange ${i}`, final: true });
+      provider.emit({ type: 'text', text: `Alternative ${i}`, final: true });
+      provider.emit({ type: 'response', status: 'completed' });
+    }
+    await waitUntil(() => provider.latest.textInputs.length === 5);
+    researcher.pushEvent('run_1', { event: 'run.completed', run_id: 'run_1', output: 'Cancellation is in src/playback.js:42. Uncertainty: remote device drain is not observable.', usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 } });
+    await delay(80);
+    expect(provider.latest.contextResponses).toBe(0);
+    send(client.socket, { type: 'playback.state', active: false, microphoneActive: true });
+    await delay(20); expect(provider.latest.contextResponses).toBe(0);
+    send(client.socket, { type: 'playback.state', active: false, microphoneActive: false });
+    await waitUntil(() => provider.latest.contextResponses === 1);
+    expect(provider.latest.contexts.at(-1)?.text).toContain('src/playback.js:42');
+    expect(provider.latest.notificationCalls).toHaveLength(0);
+    expect(hermes.startCalls).toHaveLength(0);
+    expect(researcher.startCalls).toHaveLength(1);
+  });
+});

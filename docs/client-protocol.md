@@ -1,3 +1,5 @@
+> Monte fork: protocol v7 adds interaction modes, stable discussion identifiers, silent context and playback state. See [the v7 extension](monte-brainstorm.md). The v3–v6 contracts below remain supported.
+
 # Client Protocol
 
 Hermes Live protocol v6 is strict JSON over WebSocket:

@@ -122,6 +122,9 @@ export const TaskRecordSchema = z.object({
   schemaVersion: z.literal(TASK_RECORD_SCHEMA_VERSION),
   taskId: TaskIdSchema,
   ownerId: TaskOwnerIdSchema,
+  backend: z.enum(['work', 'research']).optional(),
+  research: z.object({ discussionId: z.string().max(256), project: z.string().max(256),
+    generation: z.number().int().nonnegative(), question: z.string().max(4000), stamp: z.string().optional() }).strict().optional(),
   kind: TaskKindSchema.optional(),
   parentTaskId: TaskIdSchema.optional(),
   rootTaskId: TaskIdSchema.optional(),
@@ -258,6 +261,8 @@ export type TaskRecord = z.infer<typeof TaskRecordSchema>;
 
 export interface CreateTaskRecordInput {
   ownerIdentity: string;
+  backend?: 'work' | 'research';
+  research?: TaskRecord['research'];
   input: string;
   title?: string;
   executionMode?: TaskExecutionMode;
@@ -304,6 +309,8 @@ export function createTaskRecord(input: CreateTaskRecordInput): TaskRecord {
     schemaVersion: TASK_RECORD_SCHEMA_VERSION,
     taskId,
     ownerId: hashTaskOwnerId(input.ownerIdentity),
+    ...(input.backend ? { backend: input.backend } : {}),
+    ...(input.research ? { research: input.research } : {}),
     ...(kind === "follow_up" ? {
       kind,
       parentTaskId: TaskIdSchema.parse(input.parentTaskId),

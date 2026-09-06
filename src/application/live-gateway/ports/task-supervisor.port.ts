@@ -2,6 +2,8 @@ import type { TaskExecutionMode, TaskRecord } from "../../../domain/tasks/index.
 
 export interface SubmitBackgroundTaskInput {
   ownerIdentity: string;
+  backend?: 'work' | 'research';
+  research?: TaskRecord['research'];
   sessionKey: string;
   input: string;
   title?: string;

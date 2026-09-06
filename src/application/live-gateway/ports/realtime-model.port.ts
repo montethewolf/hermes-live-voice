@@ -13,7 +13,8 @@ export type LiveToolName =
   | "get_background_task"
   | "follow_up_background_task"
   | "stop_background_task"
-  | "pause_voice_input";
+  | "pause_voice_input"
+  | "set_conversation_mode" | "select_project" | "update_discussion_notes" | "consult_hermes";
 
 export interface LiveModelAudio {
   data: string;
@@ -94,6 +95,9 @@ export interface LiveModelSession {
   cancelResponse(reason?: string, truncate?: RealtimeResponseTruncation): Promise<boolean>;
   sendToolResponse(call: LiveToolCall, response: Record<string, unknown>): Promise<void>;
   sendTaskNotification?(notification: LiveTaskNotification): Promise<void>;
+  updateConfiguration?(instructions: string, tools: readonly LiveToolName[]): Promise<void>;
+  insertContext?(label: string, text: string): Promise<void>;
+  requestContextResponse?(): Promise<void>;
   close(): Promise<void>;
 }
 

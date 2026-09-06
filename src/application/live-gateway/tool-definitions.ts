@@ -7,6 +7,17 @@ const TASK_ID_SCHEMA = {
 } as const;
 
 const HERMES_LIVE_TOOL_DEFINITIONS = [
+  { name: 'set_conversation_mode', description: 'Inspect mode, project, and pending investigation, or change Work/Brainstorm locally. No Hermes task is started. For explicit implementation requests, first switch to Work; only after success use a Work tool. Hypothetical implementation questions stay in Brainstorm.',
+    parametersJsonSchema: { type: 'object', additionalProperties: false, properties: {
+      interactionMode: { type: 'string', enum: ['work', 'brainstorm'] }, project: { type: 'string' } } } },
+  { name: 'select_project', description: 'Resolve a project from the registered repositories. Ask the user once if ambiguous. Set new_topic only when the user changes the subject; old research is retained without interruption.',
+    parametersJsonSchema: { type: 'object', additionalProperties: false, properties: { project: { type: 'string' }, new_topic: { type: 'boolean' } }, required: ['project'] } },
+  { name: 'update_discussion_notes', description: 'Fast local update of structured discussion notes. Decisions are only choices explicitly accepted by the user; keep your proposals in alternatives. Merge only the supplied fields, keeping notes under 6000 characters.',
+    parametersJsonSchema: { type: 'object', additionalProperties: false, properties: {
+      goals: { type: 'string' }, alternatives: { type: 'string' }, rejected: { type: 'string' }, decisions: { type: 'string' },
+      constraints: { type: 'string' }, questions: { type: 'string' }, decision_evidence: { type: 'string', description: 'Exact quote from a finalized user message accepting the decision; required when adding decisions.' } } } },
+  { name: 'consult_hermes', description: 'Ask the restricted read-only Hermes researcher for missing repository evidence or deeper analysis. Returns a durable receipt immediately; continue discussing while it runs. Only one outstanding investigation per discussion.',
+    parametersJsonSchema: { type: 'object', additionalProperties: false, properties: { question: { type: 'string', maxLength: 4000 } }, required: ['question'] } },
   {
     name: "continue_hermes_conversation",
     description:
@@ -132,13 +143,13 @@ const HERMES_LIVE_TOOL_DEFINITIONS = [
   parametersJsonSchema: Readonly<Record<string, unknown>>;
 }>;
 
-export const HERMES_LIVE_TOOL_DECLARATIONS = HERMES_LIVE_TOOL_DEFINITIONS.map((tool) => ({
+export const HERMES_LIVE_TOOL_DECLARATIONS = HERMES_LIVE_TOOL_DEFINITIONS.slice(4).map((tool) => ({
   name: tool.name,
   description: tool.description,
   parametersJsonSchema: tool.parametersJsonSchema,
 }));
 
-export const OPENAI_HERMES_LIVE_TOOLS = HERMES_LIVE_TOOL_DEFINITIONS.map((tool) => ({
+export const OPENAI_HERMES_LIVE_TOOLS = HERMES_LIVE_TOOL_DEFINITIONS.slice(4).map((tool) => ({
   type: "function" as const,
   name: tool.name,
   description: tool.description,
@@ -146,6 +157,9 @@ export const OPENAI_HERMES_LIVE_TOOLS = HERMES_LIVE_TOOL_DEFINITIONS.map((tool) 
 }));
 
 const COMPACT_TOOL_DESCRIPTIONS: Record<LiveToolName, string> = {
+  set_conversation_mode: 'Inspect or change Work/Brainstorm mode without starting work.',
+  select_project: 'Select a registered repository.', update_discussion_notes: 'Save structured discussion notes.',
+  consult_hermes: 'Start a restricted read-only research consultation.',
   continue_hermes_conversation: "Continue the selected saved Hermes chat for one short turn.",
   start_background_task: "Start durable Hermes work while the user keeps talking or disconnects.",
   list_background_tasks: "List active and recent tasks with their exact ids.",
@@ -158,13 +172,13 @@ const COMPACT_TOOL_DESCRIPTIONS: Record<LiveToolName, string> = {
 export function selectHermesLiveToolDeclarations(names?: readonly LiveToolName[]) {
   if (names === undefined) return HERMES_LIVE_TOOL_DECLARATIONS;
   const allowed = new Set(names);
-  return HERMES_LIVE_TOOL_DECLARATIONS.filter((tool) => allowed.has(tool.name));
+  return HERMES_LIVE_TOOL_DEFINITIONS.filter((tool) => allowed.has(tool.name)).map(tool => ({ ...tool }));
 }
 
 export function selectOpenAIHermesLiveTools(names?: readonly LiveToolName[]) {
   if (names === undefined) return OPENAI_HERMES_LIVE_TOOLS;
   const allowed = new Set(names);
-  return OPENAI_HERMES_LIVE_TOOLS.filter((tool) => allowed.has(tool.name));
+  return HERMES_LIVE_TOOL_DEFINITIONS.filter((tool) => allowed.has(tool.name)).map(tool => ({ type: "function" as const, name: tool.name, description: tool.description, parameters: tool.parametersJsonSchema }));
 }
 
 /** Keep local-model prefill small without changing names, validation, or capabilities. */

@@ -881,6 +881,8 @@ function hasSameTaskDefinition(current: TaskRecord, updated: TaskRecord): boolea
   return current.schemaVersion === updated.schemaVersion
     && current.taskId === updated.taskId
     && current.ownerId === updated.ownerId
+    && (current.backend ?? 'work') === (updated.backend ?? 'work')
+    && isDeepStrictEqual(current.research, updated.research)
     && current.kind === updated.kind
     && current.parentTaskId === updated.parentTaskId
     && current.rootTaskId === updated.rootTaskId

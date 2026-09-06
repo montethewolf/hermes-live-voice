@@ -77,6 +77,8 @@ const SessionStartMessageSchema = z
     profileId: ClientMetadataStringSchema.optional(),
     userLabel: ClientMetadataStringSchema.optional(),
     conversation: ConversationSelectionSchema.optional(),
+    discussionId: ConversationIdSchema.optional(),
+    interactionMode: z.enum(["work", "brainstorm"]).optional(),
   })
   .strict();
 
@@ -164,6 +166,13 @@ const SessionCloseMessageSchema = z
 
 export const ClientMessageSchema = z.discriminatedUnion("type", [
   SessionStartMessageSchema,
+  z.object({ type: z.literal('session.mode.set'), id: RequestIdSchema,
+    interactionMode: z.enum(['work', 'brainstorm']).optional(), project: z.string().trim().min(1).max(256).optional() }).strict(),
+  z.object({ type: z.literal('session.context.set'), id: RequestIdSchema,
+    discussionId: ConversationIdSchema, conversation: ConversationSelectionSchema }).strict(),
+  z.object({ type: z.literal('playback.state'), id: OptionalRequestIdSchema,
+    active: z.boolean(), microphoneActive: z.boolean() }).strict(),
+  z.object({ type: z.literal('context.input'), id: OptionalRequestIdSchema, text: z.string().min(1).max(20000) }).strict(),
   AudioInputMessageSchema,
   AudioEndMessageSchema,
   TextInputMessageSchema,
@@ -175,6 +184,9 @@ export const ClientMessageSchema = z.discriminatedUnion("type", [
   TaskNotificationAckMessageSchema,
   SessionCloseMessageSchema,
 ]).superRefine((message, context) => {
+  if (message.type === 'session.start' && message.protocolVersion < 7 && (message.discussionId !== undefined || message.interactionMode !== undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: 'Discussion modes require protocol v7.' });
+  }
   if (message.type === "session.start" && message.protocolVersion < 4 && message.conversation !== undefined) {
     context.addIssue({
       code: z.ZodIssueCode.custom,

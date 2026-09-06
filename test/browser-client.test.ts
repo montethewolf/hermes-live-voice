@@ -8,7 +8,7 @@ import {
 } from "../clients/browser/hermes-live-client.js";
 
 describe("HermesLiveClient", () => {
-  it("negotiates protocol v6 and sends the exact task command envelopes", async () => {
+  it("negotiates protocol v7 with v6 Work compatibility and sends the exact task command envelopes", async () => {
     const client = createClient();
     const connection = client.connect();
     const socket = await nextSocket();
@@ -17,7 +17,7 @@ describe("HermesLiveClient", () => {
     expect(socket.sent[0]).toEqual({
       type: "session.start",
       id: "req_1",
-      protocolVersion: 6,
+      protocolVersion: 7,
       profileId: "demo",
       conversation: { mode: "new" },
     });
@@ -59,7 +59,7 @@ describe("HermesLiveClient", () => {
     socket.open();
     expect(socket.sent[0]).toMatchObject({
       type: "session.start",
-      protocolVersion: 6,
+      protocolVersion: 7,
       conversation: { mode: "resume", sessionId: "saved_chat" },
     });
     socket.message({
@@ -1178,7 +1178,7 @@ describe("HermesLiveClient", () => {
     socket.open();
     socket.message({ ...readyMessage("legacy"), protocolVersion: 2 });
 
-    await expect(connection).rejects.toThrow(/protocol version 2.*protocol v6.*upgrade/i);
+    await expect(connection).rejects.toThrow(/protocol version 2.*protocol v7.*upgrade/i);
     expect(socket.closeCalls.at(-1)).toMatchObject({ code: 4000, reason: "invalid server message" });
   });
 });

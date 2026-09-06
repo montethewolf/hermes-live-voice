@@ -1,3 +1,5 @@
+> Monte Chat fork release `1.1.0-monte.1`, based on upstream 1.1.0. See [Brainstorm and protocol v7](docs/monte-brainstorm.md).
+
 <p align="center">
   <img src="assets/banner.svg" alt="Hermes Live Voice — Keep talking. Hermes keeps working." width="100%">
 </p>

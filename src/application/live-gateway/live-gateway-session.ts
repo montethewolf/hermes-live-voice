@@ -1,3 +1,6 @@
+import { ConversationBrain, MODE_TOOLS } from '../brainstorm/conversation-brain.js';
+import type { VoiceStateStore } from '../brainstorm/voice-state.js';
+import type { RepositoryRegistry } from '../brainstorm/repository-registry.js';
 import { createHash, randomUUID } from "node:crypto";
 import { errorToMessage } from "../../domain/error-message.js";
 import { isPcmMimeType, requirePcmSampleRate } from "../../domain/audio/pcm.js";
@@ -65,6 +68,9 @@ const MAX_TOOL_RESOURCE_KEYS = 8;
 
 export interface LiveGatewaySessionDeps {
   config: AppConfig;
+  voiceStore?: VoiceStateStore;
+  repositories?: RepositoryRegistry;
+  researchAvailable?: boolean;
   hermes: HermesRunsPort;
   taskSupervisor: TaskSupervisorPort;
   liveModel: LiveModelAdapter;
@@ -81,6 +87,12 @@ interface ProviderToolCallRecord {
 }
 
 export class LiveGatewaySession {
+  private brain?: ConversationBrain;
+  private playbackActive = true;
+  private microphoneActive = false;
+  private discussionId = '';
+  private selectedHistory = '';
+  private readonly controlRequests = new Map<string, { fingerprint: string; operation: Promise<void>; response?: ServerMessage }>();
   private readonly id = `live_${randomUUID().replaceAll("-", "")}`;
   private readonly notificationToken = randomUUID().replaceAll("-", "");
   private readonly abort = new AbortController();
@@ -97,6 +109,7 @@ export class LiveGatewaySession {
   private protocolVersion: HermesLiveProtocolVersion = 3;
   private conversation: PublicConversation = { mode: "unbound" };
   private conversationOperation: Promise<void> = Promise.resolve();
+  private pendingConversationWork = 0;
   private unsubscribeTasks?: () => void;
   private readonly pendingTaskRecords = new Map<string, TaskRecord>();
   private readonly pendingNotifications = new Map<string, TaskRecord>();
@@ -181,6 +194,24 @@ export class LiveGatewaySession {
       if (this.protocolVersion >= 4) {
         this.conversation = await this.resolveConversation(message.conversation ?? { mode: "unbound" });
       }
+      this.discussionId = message.discussionId ?? this.conversation.sessionId ?? this.id;
+      if (this.supportsBrainstorm()) {
+        this.brain = new ConversationBrain({
+          ownerId: this.ownerId, sessionKey: this.sessionKey, discussionId: this.discussionId,
+          store: this.deps.voiceStore!, registry: this.deps.repositories!, tasks: this.deps.taskSupervisor,
+          provider: () => this.liveSession, workInstruction: () => this.workInstruction(), workTools: () => this.legacyProviderTools(),
+          idle: () => this.readySent && !this.closing && !this.playbackActive && !this.microphoneActive && !this.userSpeaking && !this.providerResponseActive && !this.providerTurnResponseExpected,
+          changed: () => { void this.sendModeStatus(); },
+          error: () => this.deps.logger.warn('discussion context operation unavailable', { sessionId: this.id }),
+          researchAvailable: this.deps.researchAvailable === true,
+          ongoingConversationWork: () => this.pendingConversationWork,
+          metric: (name, detail) => this.deps.logger.info(name, { sessionId: this.id, ...detail }),
+        });
+        await this.brain.init();
+        if (this.selectedHistory) await this.brain.setHistory(this.selectedHistory);
+      } else if (message.interactionMode === 'brainstorm') {
+        throw new Error('Brainstorm requires protocol v7 and the supported OpenAI adapter');
+      }
       startupPhase = "realtime";
       const providerEvents: LiveModelEvent[] = [];
       let providerEventBytes = 0;
@@ -199,15 +230,7 @@ export class LiveGatewaySession {
 
       const connect = this.deps.liveModel.connect({
         sessionId: this.id,
-        systemInstruction: buildSystemInstruction(
-          this.notificationToken,
-          this.deps.config.tasks.trustDeclaredReadOnly === true,
-          {
-            bound: this.conversation.mode !== "unbound",
-            voiceInputPause: this.protocolVersion >= 6,
-          },
-          this.deps.config.realtime.provider === "local",
-        ),
+        systemInstruction: this.brain?.instruction() ?? this.workInstruction(),
         availableTools: this.availableProviderTools(),
         safetyIdentifier: safetyIdentifierForSessionKey(this.sessionKey),
         callbacks: {
@@ -282,6 +305,13 @@ export class LiveGatewaySession {
         return;
       }
 
+      if (this.brain) {
+        if (!connected.updateConfiguration || !connected.insertContext) throw new Error('Provider does not support discussion modes');
+        if (message.interactionMode && message.interactionMode !== this.brain.mode) await this.brain.setMode(message.interactionMode);
+        await this.brain.restore();
+        void this.brain.refresh(true);
+      }
+
       // Recent history is intentionally bounded for the public inbox, but
       // active work and unread notifications are correctness-critical. Load
       // those independently so neither can disappear behind newer terminal
@@ -327,6 +357,7 @@ export class LiveGatewaySession {
           },
         },
         ...(this.protocolVersion >= 4 ? { conversation: this.conversation } : {}),
+        ...(this.protocolVersion >= 7 ? { interactionMode: this.brain?.mode ?? 'work', discussionId: this.discussionId, brainstormSupported: this.supportsBrainstorm() } : {}),
       });
       const initialSnapshotReason = initialTasks.length > 0 ? "reconnect" : "initial";
       if (projectedInitialTasks.length === 0) {
@@ -351,7 +382,9 @@ export class LiveGatewaySession {
       }
       this.readySent = true;
       const initialTaskSequences = new Map(initialTasks.map((record) => [record.taskId, record.sequence]));
+      for (const record of initialTasks) if (record.backend === 'research') void this.brain?.receive(record);
       for (const record of unreadTasks) {
+        if (record.backend === 'research') continue;
         const notification = projectTaskNotification(record);
         if (!record.notification.unread || !notification) continue;
         this.send({
@@ -409,6 +442,7 @@ export class LiveGatewaySession {
   }
 
   async close(): Promise<void> {
+    void this.brain?.close().catch(() => {});
     if (this.closePromise) return this.closePromise;
     this.closing = true;
     this.closePromise = this.performClose();
@@ -480,7 +514,70 @@ export class LiveGatewaySession {
       return;
     }
 
+    if (message.type === 'session.mode.set' || message.type === 'session.context.set') {
+      if (this.protocolVersion < 7 || !this.brain) {
+        this.fail('unsupported_capability', new Error('Brainstorm mode controls require protocol v7 and the supported OpenAI adapter.'), true, message.id);
+        return;
+      }
+      const fingerprint = JSON.stringify(message);
+      const previous = this.controlRequests.get(message.id);
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) throw new Error('Control request id reused with different arguments');
+        await previous.operation;
+        if (previous.response) this.send(previous.response);
+        return;
+      }
+      if (this.controlRequests.size >= 4096) throw new Error('Control request history full; reconnect to continue');
+      const operation = (async () => {
+        if (message.type === 'session.mode.set') {
+          if (message.interactionMode || message.project) {
+            const result = await this.brain!.setMode(message.interactionMode, message.project);
+            if (result.candidates) throw new Error('Project is ambiguous or unknown; select a registered project by its full name');
+          }
+          await this.sendModeStatus(message.id);
+        } else {
+          await this.brain!.control(async () => {
+            const previous = this.conversation, previousId = this.discussionId, history = this.selectedHistory;
+            this.brain!.transitioning = true;
+            try {
+              const conversation = await this.resolveConversation(message.conversation);
+              await this.cancelRealtimeResponse('discussion changed');
+              for (const record of this.providerToolCalls.values()) if (record.state === 'pending') record.cancelled = true;
+              this.conversation = conversation;
+              this.discussionId = message.discussionId;
+              await this.liveSession!.updateConfiguration!(this.brain!.instruction(), this.brain!.tools());
+              await this.brain!.switchDiscussion(message.discussionId, this.selectedHistory);
+              const response: ServerMessage = { type: 'session.context.changed', requestId: message.id, discussionId: message.discussionId, conversation };
+              this.controlRequests.get(message.id)!.response = response;
+              this.send(response);
+              await this.sendModeStatus();
+            } catch (error) {
+              this.conversation = previous; this.discussionId = previousId;
+              try {
+                await this.liveSession!.updateConfiguration!(this.brain!.instruction(), this.brain!.tools());
+                await this.brain!.switchDiscussion(previousId, history);
+              } catch { await this.closeClientAfterCleanup(1011, 'context rollback failed'); }
+              throw error;
+            } finally { this.brain!.transitioning = false; }
+          });
+        }
+      })();
+      this.controlRequests.set(message.id, { fingerprint, operation });
+      await operation;
+      return;
+    }
     switch (message.type) {
+      case 'context.input':
+        if (!this.brain || !this.liveSession.insertContext) throw new Error('Labelled context requires v7 OpenAI');
+        await this.liveSession.insertContext('status-brief', message.text);
+        return;
+      case 'playback.state':
+        if (this.protocolVersion < 7) throw new Error('Playback state requires v7');
+        this.playbackActive = message.active;
+        this.microphoneActive = message.microphoneActive;
+        void this.brain?.flush();
+        this.scheduleNotificationFlush();
+        return;
       case "audio.input":
         validateAudioFrame(message.data, message.mimeType, this.deps.config.server.maxAudioBytes);
         this.userSpeaking = true;
@@ -501,6 +598,7 @@ export class LiveGatewaySession {
         await this.forwardRealtimeClientInput("text", () => this.liveSession!.sendText(message.text), true);
         return;
       case "response.cancel":
+        if (message.truncate || this.providerResponseActive) await this.brain?.interrupt(message.truncate?.itemId);
         await this.cancelRealtimeResponse(message.reason, message.truncate);
         return;
       case "task.list": {
@@ -533,19 +631,21 @@ export class LiveGatewaySession {
         return;
       }
       case "task.follow_up": {
+        if (this.brain?.mode === 'brainstorm' || this.brain?.transitioning) throw new Error('Work execution is disabled in Brainstorm');
         if (this.protocolVersion < 4 || !this.deps.taskSupervisor.followUp) {
           throw new Error("Task follow-ups require Hermes Live protocol v4.");
         }
         validateText(message.message, this.deps.config.server.maxTextChars, "Task follow-up message");
+        const originConversationId = this.conversation.sessionId;
         const task = await this.runTaskOperation(
-          () => this.deps.taskSupervisor.followUp!({
+          async () => this.deps.taskSupervisor.followUp!({
             ownerIdentity: this.sessionKey!,
             ownerId: this.ownerId!,
             sessionKey: this.sessionKey!,
             parentTaskId: message.taskId,
-            input: message.message,
+            input: await this.brain?.handoff(message.message) ?? message.message,
             ...(message.title ? { title: message.title } : {}),
-            ...(this.conversation.sessionId ? { originConversationId: this.conversation.sessionId } : {}),
+            ...(originConversationId ? { originConversationId } : {}),
           }),
           "Unable to start that task follow-up.",
         );
@@ -597,6 +697,7 @@ export class LiveGatewaySession {
   private async resolveConversation(
     selection: NonNullable<Extract<ClientMessage, { type: "session.start" }>["conversation"]>,
   ): Promise<PublicConversation> {
+    this.selectedHistory = "";
     if (selection.mode === "unbound") return { mode: "unbound" };
 
     const assertSessionsSupported = this.deps.hermes.assertSessionsSupported;
@@ -617,6 +718,7 @@ export class LiveGatewaySession {
     }
 
     const history = await getSessionHistory.call(this.deps.hermes, selection.sessionId!, this.abort.signal);
+    this.selectedHistory = JSON.stringify(history.messages.filter(m => m.role === 'user' || m.role === 'assistant').slice(-20)).slice(-20000);
     const session = await getSession.call(this.deps.hermes, history.sessionId, this.abort.signal);
     return publicConversation("resume", session);
   }
@@ -627,7 +729,25 @@ export class LiveGatewaySession {
     return result;
   }
 
-  private availableProviderTools(): LiveToolName[] {
+  private supportsBrainstorm() {
+    return this.protocolVersion >= 7 && this.deps.config.realtime.provider === 'openai' && Boolean(this.deps.voiceStore && this.deps.repositories);
+  }
+
+  private workInstruction() {
+    return buildSystemInstruction(this.notificationToken, this.deps.config.tasks.trustDeclaredReadOnly === true,
+      { bound: this.conversation.mode !== 'unbound', voiceInputPause: this.protocolVersion >= 6 }, this.deps.config.realtime.provider === 'local');
+  }
+
+  private async sendModeStatus(requestId?: string) {
+    if (!this.brain || this.closing || !this.readySent) return;
+    const response: ServerMessage = { type: 'session.mode.changed', ...(requestId ? { requestId } : {}), ...await this.brain.status() };
+    if (requestId) { const record = this.controlRequests.get(requestId); if (record) record.response = response; }
+    this.send(response);
+  }
+
+  private availableProviderTools(): LiveToolName[] { return this.brain?.tools() ?? this.legacyProviderTools(); }
+
+  private legacyProviderTools(): LiveToolName[] {
     const tools: LiveToolName[] = [
       "start_background_task",
       "list_background_tasks",
@@ -646,6 +766,22 @@ export class LiveGatewaySession {
 
   private executeToolCall(call: LiveToolCall): Promise<Record<string, unknown>> {
     if (!this.ownerId || !this.sessionKey) throw new Error("session.start has not completed.");
+    if (MODE_TOOLS.includes(call.name as LiveToolName)) {
+      if (!this.brain) return Promise.resolve({ ok: false, error: 'Brainstorm is unsupported; protocol v7 and OpenAI are required.' });
+      switch (call.name) {
+        case 'set_conversation_mode': {
+          const mode = call.args.interactionMode;
+          if (mode !== undefined && mode !== 'work' && mode !== 'brainstorm') throw new Error('Invalid conversation mode');
+          return mode || call.args.project ? this.brain.setMode(mode, optionalStringArg(call, 'project')) : this.brain.status().then(status => ({ ok: true, ...status }));
+        }
+        case 'select_project': return this.brain.selectProject(stringArg(call, 'project'), call.args.new_topic === true);
+        case 'update_discussion_notes': return this.brain.updateNotes(call.args);
+        case 'consult_hermes': return this.brain.consult(stringArg(call, 'question'));
+      }
+    }
+    if ((this.brain?.mode === 'brainstorm' || this.brain?.transitioning) && !['list_background_tasks', 'get_background_task', 'stop_background_task', 'pause_voice_input'].includes(call.name)) {
+      return Promise.resolve({ ok: false, error: 'Work execution is disabled in Brainstorm. An explicit implementation request must switch to Work successfully first.' });
+    }
     switch (call.name) {
       case "continue_hermes_conversation": {
         const message = stringArg(call, "message");
@@ -661,12 +797,16 @@ export class LiveGatewaySession {
         if (!chatSession) {
           return Promise.resolve({ ok: false, error: "This Hermes installation cannot continue saved conversations." });
         }
+        const selectedId = this.conversation.sessionId!;
+        const discussionId = this.discussionId;
+        const handoff = this.brain?.handoff(message) ?? Promise.resolve(message);
+        this.pendingConversationWork++;
         return this.serializeConversationOperation(async () => {
-          const result = await chatSession.call(this.deps.hermes, this.conversation.sessionId!, message, {
+          const result = await chatSession.call(this.deps.hermes, selectedId, await handoff, {
             signal: this.abort.signal,
             sessionKey: this.sessionKey!,
           });
-          this.conversation = {
+          if (discussionId === this.discussionId) this.conversation = {
             ...this.conversation,
             sessionId: result.sessionId,
             lastActiveAt: Date.now(),
@@ -677,7 +817,7 @@ export class LiveGatewaySession {
             message: result.content,
             ...(result.usage ? { usage: result.usage } : {}),
           };
-        });
+        }).finally(() => { this.pendingConversationWork--; });
       }
       case "start_background_task": {
         const message = stringArg(call, "message");
@@ -695,14 +835,15 @@ export class LiveGatewaySession {
           ? resourceKeysArg(call)
           : undefined;
         const input = recentContext ? `${message}\n\nRecent voice context:\n${recentContext}` : message;
-        return this.runTaskOperation(() => this.deps.taskSupervisor.submit({
+        const originConversationId = this.conversation.sessionId;
+        return this.runTaskOperation(async () => this.deps.taskSupervisor.submit({
           ownerIdentity: this.sessionKey!,
           sessionKey: this.sessionKey!,
-          input,
+          input: await this.brain?.handoff(input) ?? input,
           ...(title ? { title } : {}),
           executionMode,
           ...(resourceKeys ? { resourceKeys } : {}),
-          ...(this.conversation.sessionId ? { originConversationId: this.conversation.sessionId } : {}),
+          ...(originConversationId ? { originConversationId } : {}),
         }), "Background task could not be accepted safely.").then((task) => ({
           spoken_response: "I've started that in the background. You can keep talking.",
           ok: true,
@@ -749,14 +890,15 @@ export class LiveGatewaySession {
         if (this.protocolVersion < 4 || !this.deps.taskSupervisor.followUp) {
           return Promise.resolve({ ok: false, error: "Task follow-ups require Hermes Live protocol v4." });
         }
-        return this.runTaskOperation(() => this.deps.taskSupervisor.followUp!({
+        const originConversationId = this.conversation.sessionId;
+        return this.runTaskOperation(async () => this.deps.taskSupervisor.followUp!({
           ownerIdentity: this.sessionKey!,
           ownerId: this.ownerId!,
           sessionKey: this.sessionKey!,
           parentTaskId: taskId,
-          input: message,
+          input: await this.brain?.handoff(message) ?? message,
           ...(title ? { title } : {}),
-          ...(this.conversation.sessionId ? { originConversationId: this.conversation.sessionId } : {}),
+          ...(originConversationId ? { originConversationId } : {}),
         }), "Unable to start that task follow-up.").then((task) => ({
           spoken_response: "I've started that follow-up in the background.",
           ok: true,
@@ -839,7 +981,7 @@ export class LiveGatewaySession {
       return;
     }
 
-    if (this.pendingProviderToolCalls >= MAX_PENDING_PROVIDER_TOOL_CALLS) {
+    if (this.pendingProviderToolCalls >= MAX_PENDING_PROVIDER_TOOL_CALLS && !MODE_TOOLS.includes(call.name as LiveToolName)) {
       this.failProviderToolQueueOverflow();
       return;
     }
@@ -869,7 +1011,10 @@ export class LiveGatewaySession {
     };
     this.providerToolCalls.set(id, record);
     this.pendingProviderToolCalls += 1;
-    this.scheduleProviderToolOperation(async () => {
+    const schedule = MODE_TOOLS.includes(call.name as LiveToolName)
+      ? (op: () => Promise<void>) => { void op(); }
+      : (op: () => Promise<void>) => this.scheduleProviderToolOperation(op);
+    schedule(async () => {
       try {
         if (record.cancelled) return;
         let response: Record<string, unknown>;
@@ -1024,6 +1169,7 @@ export class LiveGatewaySession {
 
   private handleLiveModelEvent(event: LiveModelEvent): void {
     if (event.type === "audio") {
+      this.brain?.audio(event.audio.itemId);
       validateAudioFrame(event.audio.data, event.audio.mimeType, this.deps.config.server.maxAudioBytes);
       const itemId = publicProviderIdentifier(event.audio.itemId);
       const contentIndex = publicContentIndex(event.audio.contentIndex);
@@ -1037,6 +1183,7 @@ export class LiveGatewaySession {
       return;
     }
     if (event.type === "text") {
+      this.brain?.text(event.speaker ?? 'assistant', event.text, event.final);
       if (!event.text || event.text.length > MAX_PROVIDER_TRANSCRIPT_CHARS) {
         throw new Error("Realtime provider transcript is empty or exceeds its limit.");
       }
@@ -1089,6 +1236,7 @@ export class LiveGatewaySession {
     }
 
     this.providerResponseActive = false;
+    void this.brain?.finishAssistant(event.status !== 'completed').catch(() => {});
     if (event.scope !== "conversation") this.clearNotificationResponsePending();
     const responseId = publicProviderIdentifier(event.responseId);
     if (event.status === "failed") {
@@ -1115,6 +1263,7 @@ export class LiveGatewaySession {
   }
 
   private dispatchTaskRecord(record: TaskRecord): void {
+    if (record.backend === 'research') { void this.brain?.receive(record).catch(() => {}); return; }
     const latestType = record.events.at(-1)?.type;
     const notificationMetadataOnly = latestType === "notification.announced"
       || latestType === "notification.acknowledged";
@@ -1652,7 +1801,7 @@ function validatedRequestId(value: unknown): string | undefined {
 
 function isPreemptiveClientControl(message: ClientMessage, sessionReady: boolean): boolean {
   if (message.type === "session.close") return true;
-  return sessionReady && ["response.cancel", "task.stop"].includes(message.type);
+  return sessionReady && ["response.cancel", "task.stop", "session.mode.set", "session.context.set", "playback.state"].includes(message.type);
 }
 
 function safetyIdentifierForSessionKey(sessionKey: string): string {

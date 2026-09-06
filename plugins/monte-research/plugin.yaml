@@ -1,0 +1,5 @@
+name: monte-research
+version: "1.1.0-monte.1"
+description: "Read-only registered repository evidence for Monte Chat brainstorming."
+hooks:
+  - pre_tool_call

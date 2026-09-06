@@ -1582,3 +1582,37 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, attempts = 2
   }
   throw new Error("Timed out waiting for task-supervisor test condition.");
 }
+
+describe('Research backend routing', () => {
+  it('atomically returns one receipt per discussion and keeps research dispatch, recovery, and stop on the original backend', async () => {
+    const store = new MemoryTaskStore(), work = new HermesHarness(), research = new HermesHarness();
+    let supervisor = new TaskSupervisor({ store, hermes: work, researchHermes: research, pollIntervalMs: 20 });
+    await supervisor.initialize();
+    const input = { ownerIdentity: 'alice', sessionKey: 'session-a', input: 'Inspect read-only', backend: 'research' as const,
+      research: { discussionId: 'discussion-a', project: 'repo-a', generation: 0, question: 'Where?' } };
+    const receipts = await Promise.all([supervisor.submit(input), supervisor.submit(input), supervisor.submit({ ...input, input: 'Speculative second question' })]);
+    expect(new Set(receipts.map(t => t.taskId)).size).toBe(1);
+    const task = receipts[0];
+    await waitFor(async () => Boolean((await store.load(task.taskId))?.runId));
+    const runId = (await store.load(task.taskId))!.runId!;
+    expect(research.startCalls).toHaveLength(1); expect(work.startCalls).toHaveLength(0);
+    await supervisor.close();
+    supervisor = new TaskSupervisor({ store, hermes: work, researchHermes: research, pollIntervalMs: 20 });
+    supervisor.registerOwner('alice', 'session-a');
+    await supervisor.initialize();
+    await waitFor(() => research.getCalls.includes(runId));
+    await supervisor.stop(hashTaskOwnerId('alice'), task.taskId);
+    await waitFor(() => research.stopCalls.includes(runId));
+    expect(work.getCalls).toHaveLength(0); expect(work.stopCalls).toHaveLength(0);
+    await supervisor.close();
+  });
+  it('rejects unavailable research rather than dispatching it to Work; legacy records still use Work', async () => {
+    const store = new MemoryTaskStore(), work = new HermesHarness();
+    const supervisor = new TaskSupervisor({ store, hermes: work }); await supervisor.initialize();
+    await expect(supervisor.submit({ ownerIdentity: 'alice', sessionKey: 'session-a', input: 'No fallback', backend: 'research', research: { discussionId: 'a', project: 'b', generation: 0, question: '?' } })).rejects.toThrow('unavailable');
+    expect(work.startCalls).toHaveLength(0);
+    await supervisor.submit({ ownerIdentity: 'alice', sessionKey: 'session-a', input: 'Legacy Work' });
+    await waitFor(() => work.startCalls.length === 1);
+    await supervisor.close();
+  });
+});
