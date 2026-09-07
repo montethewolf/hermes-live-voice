@@ -196,7 +196,11 @@ export class HermesClient implements HermesRunsPort {
     }
     return {
       sessionId: response.session_id,
-      messages: response.data.map((value) => parseHermesSessionMessage(value)),
+      // Native gateway transcripts include metadata-only rows alongside dialogue.
+      // They are not conversation messages and must not prevent a thread resume.
+      messages: response.data
+        .filter((value) => !isRecord(value) || value.role !== "session_meta")
+        .map((value) => parseHermesSessionMessage(value)),
     };
   }
 

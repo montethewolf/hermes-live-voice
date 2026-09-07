@@ -1,4 +1,4 @@
-# Monte Chat fork: 1.1.0-monte.1
+# Monte Chat fork: 1.1.0-monte.2
 
 This release forks upstream HLV v1.1.0 (commit `ce16d93f475ad138a6efb018e4a0417c6c5a501c`). Protocols v3–v6 retain Work behavior. Protocol v7 supports Work/Brainstorm with the OpenAI adapter, durable discussion notes, registered repository evidence, and an isolated read-only Hermes research backend.
 

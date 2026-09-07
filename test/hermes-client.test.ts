@@ -510,6 +510,38 @@ describe("HermesClient", () => {
     });
   });
 
+  it("resumes native gateway history containing metadata-only session markers", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      object: "list", session_id: "focused_thread_tip",
+      data: [
+        { role: "user", content: "Keep this design" },
+        { role: "session_meta", content: null, tool_calls: null, display_kind: null },
+        { role: "assistant", content: null, tool_calls: [{ id: "tool_1" }] },
+        { role: "tool", content: "Verified repository evidence" },
+        { role: "assistant", content: "The design is saved" },
+      ],
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(hermesClient().getSessionHistory("focused_thread")).resolves.toEqual({
+      sessionId: "focused_thread_tip",
+      messages: [
+        { role: "user", content: "Keep this design" },
+        { role: "assistant", content: "" },
+        { role: "tool", content: "Verified repository evidence" },
+        { role: "assistant", content: "The design is saved" },
+      ],
+    });
+  });
+
+  it.each([null, { role: "unknown", content: "Invalid row" }, { role: "user", content: 42 }])(
+    "still rejects malformed dialogue after a session metadata marker: %j", async (invalid) => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ object: "list", session_id: "thread",
+        data: [{ role: "session_meta", content: null }, invalid] }));
+      vi.stubGlobal("fetch", fetchMock);
+      await expect(hermesClient().getSessionHistory("thread")).rejects.toThrow("invalid session message");
+    },
+  );
+
   it("continues a persisted Hermes session using the session chat endpoint", async () => {
     fetchMock
       .mockResolvedValueOnce(jsonResponse({
