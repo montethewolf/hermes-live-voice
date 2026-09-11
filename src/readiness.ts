@@ -125,7 +125,7 @@ async function checkHermesConfig(config: AppConfig, options: BuildReadinessRepor
       ...base,
       ...(capabilities.model ? { model: capabilities.model } : {}),
       ...(capabilities.features ? { features: capabilities.features } : {}),
-      approvals: hermesApprovalCompatibility(capabilities),
+      approvals: hermesApprovalCompatibility(capabilities, 8),
     };
   } catch (error) {
     return { ok: false, ...base, error: errorToMessage(error) };

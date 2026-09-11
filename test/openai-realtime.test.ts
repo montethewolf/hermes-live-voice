@@ -2378,3 +2378,15 @@ describe('OpenAI mode and labelled context updates', () => {
     } finally { await h.close(); }
   });
 });
+
+it('uses an approval-specific response instruction and cannot call tools while presenting the prompt', async () => {
+  const h = await createOpenAITestHarness();
+  try {
+    await h.session.requestContextResponse!('approval');
+    await vi.waitFor(() => expect(openAIResponseCreates(h.clientMessages)).toHaveLength(1));
+    const response = openAIResponseCreates(h.clientMessages)[0].response;
+    expect(response.instructions).toContain('pending Hermes command approval');
+    expect(response.instructions).not.toContain('newly available research');
+    expect(response.tool_choice).toBe('none');
+  } finally { await h.close(); }
+});

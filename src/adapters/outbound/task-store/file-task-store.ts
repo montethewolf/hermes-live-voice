@@ -62,7 +62,7 @@ const TaskStoreLockOwnerSchema = z.object({
 type TaskStoreLockOwner = z.infer<typeof TaskStoreLockOwnerSchema>;
 
 const TaskStoreDocumentSchema = z.object({
-  schemaVersion: z.literal(TASK_RECORD_SCHEMA_VERSION),
+  schemaVersion: z.union([z.literal(1), z.literal(TASK_RECORD_SCHEMA_VERSION)]),
   updatedAt: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   tasks: z.array(TaskRecordSchema),
 }).strict().superRefine((document, context) => {
@@ -77,7 +77,7 @@ const TaskStoreDocumentSchema = z.object({
 });
 
 interface TaskStoreDocument {
-  schemaVersion: typeof TASK_RECORD_SCHEMA_VERSION;
+  schemaVersion: 1 | typeof TASK_RECORD_SCHEMA_VERSION;
   updatedAt: number;
   tasks: TaskRecord[];
 }
@@ -883,6 +883,10 @@ function hasSameTaskDefinition(current: TaskRecord, updated: TaskRecord): boolea
     && current.ownerId === updated.ownerId
     && (current.backend ?? 'work') === (updated.backend ?? 'work')
     && isDeepStrictEqual(current.research, updated.research)
+    && current.purpose === updated.purpose
+    && current.interactiveApprovals === updated.interactiveApprovals
+    && current.selectedSessionId === updated.selectedSessionId
+    && isDeepStrictEqual(current.origin, updated.origin)
     && current.kind === updated.kind
     && current.parentTaskId === updated.parentTaskId
     && current.rootTaskId === updated.rootTaskId

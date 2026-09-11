@@ -2,6 +2,8 @@ import { z } from "zod";
 
 import {
   NotificationIdSchema,
+  DiscordOriginSchema,
+  ApprovalChoiceSchema,
   RequestIdSchema,
   TASK_LIST_MAX_LIMIT,
   TaskIdSchema,
@@ -213,7 +215,7 @@ const TaskEventBase = {
 const SessionReadyMessageSchema = z
   .object({
     type: z.literal("session.ready"),
-    protocolVersion: z.union([z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7)]),
+    protocolVersion: z.union([z.literal(3), z.literal(4), z.literal(5), z.literal(6), z.literal(7), z.literal(8)]),
     requestId: RequestIdSchema.optional(),
     sessionId: PublicIdSchema,
     model: z.string().min(1).max(PUBLIC_MODEL_MAX_CHARS),
@@ -229,6 +231,7 @@ const SessionReadyMessageSchema = z
     interactionMode: z.enum(['work', 'brainstorm']).optional(),
     discussionId: PublicIdSchema.optional(),
     brainstormSupported: z.boolean().optional(),
+    interactiveApprovals: z.boolean().optional(),
   })
   .strict();
 
@@ -401,6 +404,12 @@ const LogMessageSchema = z
   .strict();
 
 export const ServerMessageSchema = z.union([
+  z.object({ type: z.literal('task.approval.requested'), taskId: TaskIdSchema, runId: PublicIdSchema,
+    approvalRequestId: PublicIdSchema, command: z.string().max(8000), description: z.string().max(2000),
+    choices: z.array(ApprovalChoiceSchema).min(1).max(4), requestedAt: PublicTimestampSchema }).strict(),
+  z.object({ type: z.literal('task.approval.resolved'), requestId: RequestIdSchema.optional(), taskId: TaskIdSchema,
+    runId: PublicIdSchema, approvalRequestId: PublicIdSchema, state: z.enum(['responding', 'resolved', 'expired']), choice: ApprovalChoiceSchema.optional() }).strict(),
+  z.object({ type: z.literal('discussion.post.requested'), receipt: PublicIdSchema, origin: DiscordOriginSchema, text: z.string().min(1).max(6000) }).strict(),
   SessionReadyMessageSchema,
   z.object({ type: z.literal('session.mode.changed'), requestId: RequestIdSchema.optional(),
     interactionMode: z.enum(['work', 'brainstorm']), discussionId: PublicIdSchema,
@@ -433,7 +442,7 @@ export const ServerMessageSchema = z.union([
 export type ServerMessage = z.infer<typeof ServerMessageSchema>;
 export type SessionReadyMessage = Extract<ServerMessage, { type: "session.ready" }>;
 export type TaskSnapshotMessage = Extract<ServerMessage, { type: "task.snapshot" }>;
-export type TaskLifecycleMessage = Extract<ServerMessage, { type: `task.${string}` }>;
+export type TaskLifecycleMessage = Extract<ServerMessage, { type: `task.${string}`; sequence: number }>;
 
 // HermesRunEvent remains an internal upstream-adapter type. Raw run events are
 // deliberately not members of the public protocol-v6 ServerMessage union.

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 
-export const TASK_RECORD_SCHEMA_VERSION = 1 as const;
+export const TASK_RECORD_SCHEMA_VERSION = 2 as const;
 export const MAX_TASK_TITLE_CHARS = 256;
 export const MAX_TASK_INPUT_CHARS = 100_000;
 export const MAX_TASK_OUTPUT_CHARS = 200_000;
@@ -118,13 +118,23 @@ export const TaskNotificationSchema = z.object({
 });
 export type TaskNotification = z.infer<typeof TaskNotificationSchema>;
 
+export const TaskApprovalSchema = z.object({ requestId: TaskRunIdSchema, runId: TaskRunIdSchema, command: z.string().max(8000), description: z.string().max(2000),
+    choices: z.array(z.enum(['once', 'session', 'always', 'deny'])).min(1).max(4), requestedAt: TaskTimestampSchema,
+    state: z.enum(['pending', 'responding', 'resolved', 'expired']), choice: z.enum(['once', 'session', 'always', 'deny']).optional() }).strict();
+
 export const TaskRecordSchema = z.object({
-  schemaVersion: z.literal(TASK_RECORD_SCHEMA_VERSION),
+  schemaVersion: z.union([z.literal(1), z.literal(TASK_RECORD_SCHEMA_VERSION)]),
   taskId: TaskIdSchema,
   ownerId: TaskOwnerIdSchema,
   backend: z.enum(['work', 'research']).optional(),
-  research: z.object({ discussionId: z.string().max(256), project: z.string().max(256),
+  research: z.object({ discussionId: z.string().max(256), project: z.string().max(256).optional(),
     generation: z.number().int().nonnegative(), question: z.string().max(4000), stamp: z.string().optional() }).strict().optional(),
+  purpose: z.enum(['consultation', 'action', 'implementation']).optional(),
+  interactiveApprovals: z.boolean().optional(),
+  selectedSessionId: TaskHermesSessionIdSchema.optional(),
+  origin: z.object({ guildId: z.string().regex(/^\d{1,24}$/), userId: z.string().regex(/^\d{1,24}$/), channelId: z.string().regex(/^\d{1,24}$/), threadId: z.string().regex(/^\d{1,24}$/).optional() }).strict().optional(),
+  approval: TaskApprovalSchema.optional(),
+  approvalQueue: z.array(TaskApprovalSchema).max(16).optional(),
   kind: TaskKindSchema.optional(),
   parentTaskId: TaskIdSchema.optional(),
   rootTaskId: TaskIdSchema.optional(),
@@ -263,6 +273,10 @@ export interface CreateTaskRecordInput {
   ownerIdentity: string;
   backend?: 'work' | 'research';
   research?: TaskRecord['research'];
+  purpose?: TaskRecord['purpose'];
+  interactiveApprovals?: boolean;
+  selectedSessionId?: string;
+  origin?: TaskRecord['origin'];
   input: string;
   title?: string;
   executionMode?: TaskExecutionMode;
@@ -311,6 +325,10 @@ export function createTaskRecord(input: CreateTaskRecordInput): TaskRecord {
     ownerId: hashTaskOwnerId(input.ownerIdentity),
     ...(input.backend ? { backend: input.backend } : {}),
     ...(input.research ? { research: input.research } : {}),
+    ...(input.purpose ? { purpose: input.purpose } : {}),
+    ...(input.interactiveApprovals ? { interactiveApprovals: true } : {}),
+    ...(input.selectedSessionId ? { selectedSessionId: input.selectedSessionId } : {}),
+    ...(input.origin ? { origin: input.origin } : {}),
     ...(kind === "follow_up" ? {
       kind,
       parentTaskId: TaskIdSchema.parse(input.parentTaskId),

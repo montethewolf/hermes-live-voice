@@ -2717,17 +2717,69 @@ function deferred<T>(): {
 
 
 describe('Monte v7 modes', () => {
-  async function setup(research = false) {
+  async function setup(research = false, protocolVersion = 7) {
     const config = testConfig(); config.realtime.provider = 'openai';
     const hermes = new HermesHarness(), researcher = new HermesHarness(), provider = new RecordingLiveAdapter();
     writeFileSync(join(dirname(config.tasks.stateFile), 'repositories.json'), JSON.stringify({ version: 1, projects: [{ id: 'repo_0123456789abcdef', name: 'test-project', path: dirname(config.tasks.stateFile) }] }));
     const server = await startTestServer({ config, hermes, provider, ...(research ? { researchHermes: researcher } : {}) });
     const client = await connectClient(server.url);
-    send(client.socket, { type: 'session.start', id: 'start', protocolVersion: 7, discussionId: 'discussion_a', conversation: { mode: 'new' } });
+    send(client.socket, { type: 'session.start', id: 'start', protocolVersion, ...(protocolVersion >= 8 ? { origin: { guildId: '1', userId: '2', channelId: '3', threadId: '4' } } : {}), discussionId: 'discussion_a', conversation: { mode: 'new' } });
     const ready = await client.messages.wait('session.ready');
     expect(ready).toMatchObject({ interactionMode: 'work', brainstormSupported: true, discussionId: 'discussion_a' });
     return { config, hermes, researcher, provider, server, client, ready };
   }
+  it('v8 discovers projects and consults normal Hermes without project selection, while preserving Brainstorm', async () => {
+    const { hermes, researcher, provider, client } = await setup(false, 8);
+    await mode(client, 'brainstorm', 'brain');
+    expect(provider.latest.contexts[0].text).toContain('projectCatalog');
+    provider.emit({ type: 'tool_call', call: { id: 'catalog', name: 'list_projects', args: {} } });
+    expect((await provider.latest.toolResponses.wait(v => v.call.id === 'catalog')).response.projects).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'test-project' })]));
+    provider.emit({ type: 'tool_call', call: { id: 'consult', name: 'consult_hermes', args: { question: 'Find the Factory item about ending sessions; I forgot the number.' } } });
+    const receipt = (await provider.latest.toolResponses.wait(v => v.call.id === 'consult')).response;
+    expect(receipt.ok).toBe(true); await waitUntil(() => hermes.startCalls.length === 1);
+    expect(hermes.startCalls[0].input).toContain('normal Hermes tools'); expect(hermes.startCalls[0].input).toContain('test-project');
+    expect(researcher.startCalls).toHaveLength(0);
+    expect((await mode(client, 'brainstorm', 'inspect')).interactionMode).toBe('brainstorm');
+  });
+  it('v8 small actions retain mode, posts capture the current thread and tool replay cannot duplicate delivery', async () => {
+    const { hermes, provider, client } = await setup(false, 8);
+    await mode(client, 'brainstorm', 'brain');
+    provider.emit({ type: 'text', speaker: 'user', text: 'Post these notes here.', final: true });
+    const call = { id: 'post', name: 'post_discussion_message', args: { text: 'Accepted design notes.', user_evidence: 'Post these notes here.' } };
+    provider.emit({ type: 'tool_call', call });
+    const post = await client.messages.wait('discussion.post.requested');
+    expect(post.origin.threadId).toBe('4');
+    provider.emit({ type: 'tool_call', call });
+    send(client.socket, { type: 'discussion.post.result', id: 'posted', receipt: post.receipt, ok: true, messageId: '55' });
+    expect((await provider.latest.toolResponses.wait(v => v.call.id === 'post')).response).toMatchObject({ ok: true, messageId: '55' });
+    expect(client.messages.observed.filter(m => m.type === 'discussion.post.requested')).toHaveLength(1);
+    provider.emit({ type: 'text', speaker: 'user', text: 'Check the service status.', final: true });
+    provider.emit({ type: 'tool_call', call: { id: 'action', name: 'request_hermes_action', args: { message: 'Check service status', user_evidence: 'Check the service status.' } } });
+    expect((await provider.latest.toolResponses.wait(v => v.call.id === 'action')).response.ok).toBe(true);
+    await waitUntil(() => hermes.startCalls.length === 1);
+    expect((await mode(client, 'brainstorm', 'inspect')).interactionMode).toBe('brainstorm');
+  });
+  it('v8 presents approvals at playback idle and requires fresh spoken consent, then submits once', async () => {
+    const { hermes, provider, client } = await setup(false, 8);
+    provider.emit({ type: 'tool_call', call: { id: 'start-work', name: 'start_background_task', args: { message: 'Requested command' } } });
+    const task = (await provider.latest.toolResponses.wait(v => v.call.id === 'start-work')).response;
+    await waitUntil(() => hermes.startCalls.length === 1);
+    const approval = { event: 'approval.request', request_id: 'command_a', run_id: 'run_1', command: 'touch /tmp/voice-test', description: 'Requested command', choices: ['once', 'deny'] };
+    (hermes as any).snapshots.set('run_1', { object: 'hermes.run', run_id: 'run_1', status: 'waiting_for_approval', approval });
+    hermes.pushEvent('run_1', approval);
+    await client.messages.wait('task.approval.requested'); await delay(550); expect(provider.latest.contextResponses).toBe(0);
+    send(client.socket, { type: 'playback.state', active: false, microphoneActive: false });
+    await waitUntil(() => provider.latest.contextResponses === 1);
+    const args = { task_id: task.task_id, request_id: 'command_a', choice: 'once', user_evidence: 'Yes, approve once.' };
+    provider.emit({ type: 'tool_call', call: { id: 'early', name: 'respond_to_approval', args } });
+    expect((await provider.latest.toolResponses.wait(v => v.call.id === 'early')).response.ok).toBe(false);
+    const original = hermes.submitApproval.bind(hermes); hermes.submitApproval = async (...values) => ({ ...await original(...values), request_id: values[2]?.approvalId });
+    provider.emit({ type: 'text', speaker: 'user', text: 'Yes, approve once.', final: true });
+    provider.emit({ type: 'tool_call', call: { id: 'approve', name: 'respond_to_approval', args } });
+    expect((await provider.latest.toolResponses.wait(v => v.call.id === 'approve')).response.ok).toBe(true);
+    provider.emit({ type: 'tool_call', call: { id: 'approve', name: 'respond_to_approval', args } });
+    await delay(20); expect(hermes.approvalCalls).toHaveLength(1); expect(hermes.stopCalls).toHaveLength(0);
+  });
   const mode = async (client: Awaited<ReturnType<typeof connectClient>>, interactionMode: string, id: string) => {
     send(client.socket, { type: 'session.mode.set', id, interactionMode });
     return client.messages.wait('session.mode.changed', m => m.requestId === id);
@@ -2810,14 +2862,15 @@ describe('Monte v7 modes', () => {
     expect((await reconnected.messages.wait('session.ready')).interactionMode).toBe('brainstorm');
     expect(provider.latest.contexts.at(-1)?.text).toContain('Design a reconnect-safe system');
   });
-  it('keeps five exchanges moving during one investigation and introduces its findings after playback and microphone idle', async () => {
-    const { researcher, hermes, provider, client } = await setup(true);
+  it.each([7, 8])('v%s keeps five exchanges moving during one investigation and introduces findings after playback and microphone idle', async version => {
+    const { researcher, hermes, provider, client } = await setup(version === 7, version);
+    const investigator = version === 7 ? researcher : hermes;
     send(client.socket, { type: 'session.mode.set', id: 'brain', interactionMode: 'brainstorm', project: 'test project' });
     await client.messages.wait('session.mode.changed', m => m.requestId === 'brain');
     provider.emit({ type: 'tool_call', call: { id: 'research1', name: 'consult_hermes', args: { question: 'Where is cancellation handled?' } } });
     const receipt = (await provider.latest.toolResponses.wait(v => v.call.id === 'research1')).response;
     expect(receipt.ok).toBe(true);
-    await waitUntil(() => researcher.startCalls.length === 1);
+    await waitUntil(() => investigator.startCalls.length === 1);
     provider.emit({ type: 'tool_call', call: { id: 'research2', name: 'consult_hermes', args: { question: 'Where is cancellation handled?' } } });
     expect((await provider.latest.toolResponses.wait(v => v.call.id === 'research2')).response.receipt).toBe(receipt.receipt);
     for (let i = 0; i < 5; i++) {
@@ -2828,7 +2881,7 @@ describe('Monte v7 modes', () => {
       provider.emit({ type: 'response', status: 'completed' });
     }
     await waitUntil(() => provider.latest.textInputs.length === 5);
-    researcher.pushEvent('run_1', { event: 'run.completed', run_id: 'run_1', output: 'Cancellation is in src/playback.js:42. Uncertainty: remote device drain is not observable.', usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 } });
+    investigator.pushEvent('run_1', { event: 'run.completed', run_id: 'run_1', output: 'Cancellation is in src/playback.js:42. Uncertainty: remote device drain is not observable.', usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 } });
     await delay(80);
     expect(provider.latest.contextResponses).toBe(0);
     send(client.socket, { type: 'playback.state', active: false, microphoneActive: true });
@@ -2837,7 +2890,7 @@ describe('Monte v7 modes', () => {
     await waitUntil(() => provider.latest.contextResponses === 1);
     expect(provider.latest.contexts.at(-1)?.text).toContain('src/playback.js:42');
     expect(provider.latest.notificationCalls).toHaveLength(0);
-    expect(hermes.startCalls).toHaveLength(0);
-    expect(researcher.startCalls).toHaveLength(1);
+    expect((version === 7 ? hermes : researcher).startCalls).toHaveLength(0);
+    expect(investigator.startCalls).toHaveLength(1);
   });
 });

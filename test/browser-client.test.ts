@@ -8,7 +8,7 @@ import {
 } from "../clients/browser/hermes-live-client.js";
 
 describe("HermesLiveClient", () => {
-  it("negotiates protocol v7 with v6 Work compatibility and sends the exact task command envelopes", async () => {
+  it("negotiates protocol v8 with v6 Work compatibility and sends the exact task command envelopes", async () => {
     const client = createClient();
     const connection = client.connect();
     const socket = await nextSocket();
@@ -17,7 +17,7 @@ describe("HermesLiveClient", () => {
     expect(socket.sent[0]).toEqual({
       type: "session.start",
       id: "req_1",
-      protocolVersion: 7,
+      protocolVersion: 8,
       profileId: "demo",
       conversation: { mode: "new" },
     });
@@ -59,7 +59,7 @@ describe("HermesLiveClient", () => {
     socket.open();
     expect(socket.sent[0]).toMatchObject({
       type: "session.start",
-      protocolVersion: 7,
+      protocolVersion: 8,
       conversation: { mode: "resume", sessionId: "saved_chat" },
     });
     socket.message({
@@ -1178,7 +1178,7 @@ describe("HermesLiveClient", () => {
     socket.open();
     socket.message({ ...readyMessage("legacy"), protocolVersion: 2 });
 
-    await expect(connection).rejects.toThrow(/protocol version 2.*protocol v7.*upgrade/i);
+    await expect(connection).rejects.toThrow(/protocol version 2.*protocol v8.*upgrade/i);
     expect(socket.closeCalls.at(-1)).toMatchObject({ code: 4000, reason: "invalid server message" });
   });
 });
@@ -1989,3 +1989,20 @@ function deferred<T>() {
 async function flushMessages(): Promise<void> {
   for (let index = 0; index < 32; index += 1) await Promise.resolve();
 }
+
+it('v8 validates approval events and correlates an exact response without task lifecycle revisions', async () => {
+  const origin = { guildId: '1', userId: '2', channelId: '3', threadId: '4' };
+  const client = createClient({ origin }); const connecting = client.connect(); const socket = await nextSocket(); socket.open();
+  expect(socket.sent[0].origin).toEqual(origin);
+  socket.message({ ...readyMessage('v8'), protocolVersion: 8, interactionMode: 'brainstorm', discussionId: 'discussion', brainstormSupported: true, interactiveApprovals: true });
+  await connecting;
+  const requested = { type: 'task.approval.requested', taskId: 'task_a', runId: 'run_a', approvalRequestId: 'command_a', command: 'test command', description: 'One command', choices: ['once', 'deny'], requestedAt: 1 };
+  expect(validateServerMessage(requested)).toEqual(requested);
+  const seen = vi.fn(); client.on('task.approval.requested', seen); socket.message(requested); await flushMessages(); expect(seen).toHaveBeenCalledOnce();
+  const responding = client.respondApproval('task_a', 'run_a', 'command_a', 'once');
+  const sent = socket.sent.at(-1); expect(sent).toMatchObject({ type: 'task.approval.respond', approvalRequestId: 'command_a', runId: 'run_a', choice: 'once' });
+  socket.message({ type: 'task.approval.resolved', taskId: 'task_a', runId: 'run_a', approvalRequestId: 'command_a', state: 'resolved', choice: 'once', requestId: sent!.id });
+  await expect(responding).resolves.toMatchObject({ state: 'resolved' });
+  expect(client.tasks).toHaveLength(0);
+  const closing = client.disconnect(); socket.serverClose(); await closing;
+});

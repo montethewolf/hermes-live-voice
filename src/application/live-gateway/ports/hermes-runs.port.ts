@@ -127,6 +127,7 @@ export interface ApprovalResult {
   object?: string;
   run_id?: string;
   runId?: string;
+  request_id?: string;
   approval_id?: string;
   approvalId?: string;
   choice?: ApprovalChoice;

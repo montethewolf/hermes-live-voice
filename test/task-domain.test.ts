@@ -33,7 +33,7 @@ describe("task domain", () => {
     expect(task.hermesSessionId).toBe(hermesSessionIdForTask(task.taskId));
     expect(task.resourceKeys).toEqual(["repo:hermes-live"]);
     expect(task).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "queued",
       revision: 1,
       sequence: 1,

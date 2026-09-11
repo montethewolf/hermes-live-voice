@@ -11,7 +11,7 @@ export const NotesSchema = z.object({
   decisions: z.string().default(''), constraints: z.string().default(''), questions: z.string().default(''),
 }).strict().refine(n => Object.values(n).join('').length <= 6000, 'Notes exceed 6,000 characters');
 const DialogueSchema = z.object({ role: z.enum(['user', 'assistant']), text: z.string().max(20000), interrupted: z.boolean().optional(), itemId: z.string().optional() });
-const FindingSchema = z.object({ taskId: z.string(), project: z.string(), generation: z.number(), question: z.string(),
+const FindingSchema = z.object({ taskId: z.string(), project: z.string().optional(), generation: z.number(), question: z.string(),
   summary: z.string().max(8000), stamp: z.string().optional(), delivered: z.boolean().default(false) });
 export const DiscussionSchema = z.object({
   project: z.string().optional(), generation: z.number().int().nonnegative().default(0),
@@ -38,7 +38,7 @@ export class VoiceStateStore {
     return this.value;
   }
   async retainResearch(record: TaskRecord) {
-    if (record.backend !== 'research' || !record.research || !['completed', 'failed', 'cancelled'].includes(record.status)) return;
+    if ((record.backend !== 'research' && record.purpose !== 'consultation') || !record.research || !['completed', 'failed', 'cancelled'].includes(record.status)) return;
     const tag = record.research;
     await this.update(record.ownerId, tag.discussionId, d => {
       if (d.findings.some(f => f.taskId === record.taskId)) return;

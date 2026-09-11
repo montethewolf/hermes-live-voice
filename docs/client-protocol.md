@@ -1,3 +1,11 @@
+## Monte v8 extension
+
+The Monte fork's current protocol is v8, with v3–v7 compatibility. V8 session starts and context changes accept optional `origin` metadata containing Discord guild/user/channel and focused thread IDs. `session.ready.interactiveApprovals` advertises command approval controls.
+
+`task.approval.requested` carries `taskId`, `runId`, `approvalRequestId`, redacted `command`, `description`, allowed `choices`, and `requestedAt`. The client replies with correlated `task.approval.respond` (`id`, the same three identities, and `choice`). `task.approval.resolved` carries those identities, state and optional choice; a direct response includes the client `requestId`. Approval events are separate from task lifecycle sequence revisions. A duplicate or stale response must not execute again. Hermes upstream calls use `request_id`; no resolve-all approval is sent.
+
+`discussion.post.requested` contains a receipt, captured origin and requested text. The trusted bridge returns `discussion.post.result` with an `id`, receipt, `ok`, and optional message ID/error. The bridge retains private delivery receipts and disables mentions. An uncertain outcome is never automatically resubmitted.
+
 > Monte fork: protocol v7 adds interaction modes, stable discussion identifiers, silent context and playback state. See [the v7 extension](monte-brainstorm.md). The v3–v6 contracts below remain supported.
 
 # Client Protocol
@@ -401,3 +409,5 @@ Errors use:
 ```
 
 When a request has an `id`, validation or state failures echo it as `requestId`. Clients should show the bounded public message and use gateway logs for private diagnostics.
+
+Approval prompts use a response-specific instruction and disable tools for that prompt, leaving subsequent user turns to use the configured session tools. See [official OpenAI Realtime conversation guidance](https://developers.openai.com/api/docs/guides/realtime-conversations).

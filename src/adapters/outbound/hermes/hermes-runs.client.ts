@@ -389,7 +389,7 @@ export class HermesClient implements HermesRunsPort {
       body: JSON.stringify({
         choice,
         resolve_all: options.resolveAll ?? false,
-        ...(options.approvalId ? { approval_id: options.approvalId } : {}),
+        ...(options.approvalId ? { request_id: options.approvalId } : {}),
       }),
       headers: this.sessionHeaders(options.sessionKey),
       ...signalInit(options.signal),
@@ -589,6 +589,14 @@ function parseHermesRunSnapshot(value: unknown, expectedRunId: string): HermesRu
   copyOptionalRunTimestamp(value, snapshot, "created_at");
   copyOptionalRunTimestamp(value, snapshot, "updated_at");
 
+  if (status === 'waiting_for_approval' && isRecord(value.approval)) {
+    const approval = value.approval;
+    if (typeof approval.request_id === 'string' && /^[A-Za-z0-9._:-]{1,256}$/.test(approval.request_id) && typeof approval.command === 'string' && approval.command.length <= 8000) {
+      snapshot.approval = { request_id: approval.request_id, command: approval.command,
+        description: typeof approval.description === 'string' ? approval.description.slice(0, 2000) : '',
+        choices: Array.isArray(approval.choices) ? approval.choices.filter(c => ['once', 'session', 'always', 'deny'].includes(String(c))).slice(0, 4) : ['once', 'deny'] };
+    }
+  }
   if (status === "completed") {
     if (typeof value.output !== "string") {
       throw invalidHermesRunSnapshot("completed output is missing");

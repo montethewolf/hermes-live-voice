@@ -196,8 +196,8 @@ describe("HTTP server", () => {
     });
     await expect(fetch(`${server.url}/v1/capabilities`).then((res) => res.json())).resolves.toMatchObject({
       object: "hermes_live.capabilities",
-      protocolVersion: 7,
-      supportedProtocolVersions: [3, 4, 5, 6, 7],
+      protocolVersion: 8,
+      supportedProtocolVersions: [3, 4, 5, 6, 7, 8],
       realtime: {
         provider: "openai",
         model: "gpt-realtime-2",

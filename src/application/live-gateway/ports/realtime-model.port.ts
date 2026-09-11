@@ -14,6 +14,7 @@ export type LiveToolName =
   | "follow_up_background_task"
   | "stop_background_task"
   | "pause_voice_input"
+  | "request_hermes_action" | "respond_to_approval" | "post_discussion_message" | "list_projects"
   | "set_conversation_mode" | "select_project" | "update_discussion_notes" | "consult_hermes";
 
 export interface LiveModelAudio {
@@ -97,7 +98,7 @@ export interface LiveModelSession {
   sendTaskNotification?(notification: LiveTaskNotification): Promise<void>;
   updateConfiguration?(instructions: string, tools: readonly LiveToolName[]): Promise<void>;
   insertContext?(label: string, text: string): Promise<void>;
-  requestContextResponse?(): Promise<void>;
+  requestContextResponse?(kind?: 'findings' | 'approval'): Promise<void>;
   close(): Promise<void>;
 }
 

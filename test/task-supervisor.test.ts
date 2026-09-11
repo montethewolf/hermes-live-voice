@@ -1616,3 +1616,84 @@ describe('Research backend routing', () => {
     await supervisor.close();
   });
 });
+
+describe('v8 normal Hermes approvals', () => {
+  async function setup() {
+    const store = new MemoryTaskStore(), hermes = new HermesHarness();
+    const supervisor = new TaskSupervisor({ store, hermes, pollIntervalMs: 10000 });
+    await supervisor.initialize();
+    const owner = supervisor.registerOwner('alice', 'voice-owner');
+    const task = await supervisor.submit({ ownerIdentity: 'alice', sessionKey: 'voice-owner', input: 'Explicit command', interactiveApprovals: true, purpose: 'action' });
+    await waitFor(async () => Boolean((await store.load(task.taskId))?.runId));
+    const runId = (await store.load(task.taskId))!.runId!;
+    const approval = { event: 'approval.request', run_id: runId, request_id: 'command-a', command: 'touch /tmp/approved-test', description: 'Create the requested test file', choices: ['once', 'deny'] };
+    hermes.setSnapshot(runId, { object: 'hermes.run', run_id: runId, status: 'waiting_for_approval', approval });
+    hermes.pushEvent(runId, approval);
+    await waitFor(async () => (await store.load(task.taskId))?.approval?.state === 'pending');
+    return { store, hermes, supervisor, owner, task, runId, approval };
+  }
+  it('retains a targeted pending approval, rejects other owners and stale IDs, and responds only once', async () => {
+    const { store, hermes, supervisor, owner, task, runId, approval } = await setup();
+    try {
+      expect(hermes.stopCalls).toHaveLength(0); expect(hermes.approvalCalls).toHaveLength(0);
+      await expect(supervisor.respondApproval(hashTaskOwnerId('bob'), task.taskId, runId, 'command-a', 'once')).rejects.toThrow();
+      await expect(supervisor.respondApproval(owner, task.taskId, runId, 'wrong', 'once')).rejects.toThrow();
+      await expect(supervisor.respondApproval(owner, task.taskId, runId, 'command-a', 'always')).rejects.toThrow();
+      const original = hermes.submitApproval.bind(hermes);
+      hermes.submitApproval = async (...args) => ({ ...await original(...args), request_id: args[2]?.approvalId });
+      await supervisor.respondApproval(owner, task.taskId, runId, 'command-a', 'once');
+      await expect(supervisor.respondApproval(owner, task.taskId, runId, 'command-a', 'once')).rejects.toThrow();
+      hermes.pushEvent(runId, approval); await new Promise(r => setTimeout(r, 10));
+      expect((await store.load(task.taskId))?.approval?.state).toBe('resolved');
+      expect(hermes.approvalCalls).toHaveLength(1);
+      expect(hermes.approvalCalls[0]).toMatchObject({ runId, choice: 'once', options: { approvalId: 'command-a', resolveAll: false, sessionKey: 'voice-owner' } });
+    } finally { await supervisor.close(); }
+  });
+  it('keeps multiple command approvals separate within the same run', async () => {
+    const { store, hermes, supervisor, owner, task, runId, approval } = await setup();
+    try {
+      hermes.pushEvent(runId, { ...approval, request_id: 'command-b', command: 'second command' });
+      await waitFor(async () => (await store.load(task.taskId))?.approvalQueue?.length === 1);
+      const original = hermes.submitApproval.bind(hermes);
+      hermes.submitApproval = async (...args) => ({ ...await original(...args), request_id: args[2]?.approvalId });
+      await supervisor.respondApproval(owner, task.taskId, runId, 'command-a', 'once');
+      expect((await store.load(task.taskId))?.approval).toMatchObject({ requestId: 'command-b', state: 'pending', command: 'second command' });
+      await supervisor.respondApproval(owner, task.taskId, runId, 'command-b', 'deny');
+      expect(hermes.approvalCalls.map(c => c.options?.approvalId)).toEqual(['command-a', 'command-b']);
+    } finally { await supervisor.close(); }
+  });
+  it('expires approval when Hermes finishes after timeout and never retries an ambiguous response', async () => {
+    const { store, hermes, supervisor, owner, task, runId } = await setup();
+    try {
+      await expect(supervisor.respondApproval(owner, task.taskId, runId, 'command-a', 'once')).rejects.toThrow('did not confirm');
+      await expect(supervisor.respondApproval(owner, task.taskId, runId, 'command-a', 'once')).rejects.toThrow();
+      expect(hermes.approvalCalls).toHaveLength(1);
+      hermes.pushEvent(runId, { event: 'run.completed', run_id: runId, output: 'Command did not run.' });
+      await waitFor(async () => (await store.load(task.taskId))?.status === 'completed');
+      expect((await store.load(task.taskId))?.approval?.state).not.toBe('pending');
+    } finally { await supervisor.close(); }
+  });
+  it('routes project-free consultation to Work and preserves the one-investigation limit', async () => {
+    const store = new MemoryTaskStore(), hermes = new HermesHarness(), research = new HermesHarness();
+    const supervisor = new TaskSupervisor({ store, hermes, researchHermes: research }); await supervisor.initialize();
+    try {
+      const input = { ownerIdentity: 'alice', sessionKey: 'voice-owner', input: 'Find my factory item', backend: 'work' as const, purpose: 'consultation' as const, research: { discussionId: 'discussion', generation: 0, question: 'Find it' } };
+      const task = await supervisor.submit(input);
+      expect((await supervisor.submit(input)).taskId).toBe(task.taskId);
+      expect((await supervisor.submit({ ...input, research: { ...input.research, question: 'Another question' } })).taskId).toBe(task.taskId);
+      await waitFor(() => hermes.startCalls.length === 1); expect(research.startCalls).toHaveLength(0);
+    } finally { await supervisor.close(); }
+  });
+  it('binds selected-session runs without changing the helper identity and serializes session writes', async () => {
+    const store = new MemoryTaskStore(), hermes = new HermesHarness();
+    const supervisor = new TaskSupervisor({ store, hermes, maxConcurrent: 2 }); await supervisor.initialize();
+    try {
+      const input = { ownerIdentity: 'alice', sessionKey: 'voice-owner', input: 'Continue here', selectedSessionId: 'selected-chat', interactiveApprovals: true };
+      const first = await supervisor.submit(input); await supervisor.submit(input);
+      await waitFor(() => hermes.startCalls.length === 1);
+      expect(hermes.startCalls[0].sessionId).toBe('selected-chat');
+      expect(first.hermesSessionId).toContain(first.taskId);
+      await new Promise(r => setTimeout(r, 10)); expect(hermes.startCalls).toHaveLength(1);
+    } finally { await supervisor.close(); }
+  });
+});

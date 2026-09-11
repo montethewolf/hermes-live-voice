@@ -133,7 +133,7 @@ describe("HermesClient", () => {
       .mockResolvedValueOnce(jsonResponse({ run_id: "run_123", status: "stopping" }))
       .mockResolvedValueOnce(jsonResponse({
         run_id: "run_123",
-        approval_id: "approval_1",
+        request_id: "approval_1",
         choice: "once",
         resolved: 1,
       }));
@@ -158,7 +158,7 @@ describe("HermesClient", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({
       choice: "once",
       resolve_all: false,
-      approval_id: "approval_1",
+      request_id: "approval_1",
     });
   });
 

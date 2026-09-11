@@ -71,10 +71,10 @@ const TASK_STOP_RESPONSE_TYPES = new Set([
   "task.unknown",
 ]);
 const OPEN = 1;
-export const HERMES_LIVE_PROTOCOL_VERSION = 7;
+export const HERMES_LIVE_PROTOCOL_VERSION = 8;
 
 const KNOWN_SERVER_MESSAGE_TYPES = new Set([
-  "session.ready", "session.mode.changed", "session.context.changed",
+  "session.ready", "session.mode.changed", "session.context.changed", "task.approval.requested", "task.approval.resolved", "discussion.post.requested",
   "session.error",
   "audio.output",
   "transcript.delta",
@@ -146,6 +146,7 @@ export class HermesLiveClient {
     this.#tokenProvider = options.token;
     this.protocolVersion = options.protocolVersion ?? HERMES_LIVE_PROTOCOL_VERSION;
     this.discussionId = options.discussionId ? requireClientId(options.discussionId, 'discussionId') : undefined;
+    this.origin = options.origin ? validateDiscordOrigin(options.origin) : undefined;
     this.profileId = optionalString(options.profileId);
     this.userLabel = optionalString(options.userLabel);
     this.conversation = normalizeConversationSelection(options.conversation ?? { mode: "new" });
@@ -295,6 +296,7 @@ export class HermesLiveClient {
             type: "session.start",
             id: requestId,
             protocolVersion: this.protocolVersion,
+            ...(this.protocolVersion >= 8 && this.origin ? { origin: this.origin } : {}),
             ...(this.protocolVersion >= 7 && this.discussionId ? { discussionId: this.discussionId } : {}),
             ...(this.profileId ? { profileId: this.profileId } : {}),
             ...(this.userLabel ? { userLabel: this.userLabel } : {}),
@@ -455,7 +457,7 @@ export class HermesLiveClient {
   }
 
   controlRequest(type, fields, options = {}) {
-    if (this.session?.protocolVersion < 7 || !this.session?.brainstormSupported) return Promise.reject(new Error('Mode controls are unsupported by this gateway/provider; v7 OpenAI is required.'));
+    if (type === 'task.approval.respond' ? this.session?.protocolVersion < 8 || !this.session?.interactiveApprovals : this.session?.protocolVersion < 7 || !this.session?.brainstormSupported) return Promise.reject(new Error('Mode controls are unsupported by this gateway/provider; v7 OpenAI is required.'));
     const id = options.id ?? this.createRequestId();
     return new Promise((resolve, reject) => {
       const unsubscribers = [];
@@ -473,7 +475,7 @@ export class HermesLiveClient {
       ];
       const timer = setTimeout(() => finish(new Error('Mode/context confirmation timed out; inspect current mode before retrying work.')), options.timeoutMs ?? 12000);
       for (const [name, fn] of listeners) unsubscribers.push(this.on(name, fn));
-      try { this.sendCorrelated({ type, id, ...fields }, { type }); }
+      try { this.sendCorrelated({ type, id, ...fields }, type === 'task.approval.respond' ? { type, ...fields } : { type }); }
       catch (error) { finish(error); }
     });
   }
@@ -484,7 +486,17 @@ export class HermesLiveClient {
   }
 
   setDiscussion(discussionId, conversation, options = {}) {
-    return this.controlRequest('session.context.set', { discussionId: requireClientId(discussionId, 'discussionId'), conversation: normalizeConversationSelection(conversation) }, options);
+    return this.controlRequest('session.context.set', { discussionId: requireClientId(discussionId, 'discussionId'), conversation: normalizeConversationSelection(conversation), ...(this.session?.protocolVersion >= 8 && options.origin ? { origin: validateDiscordOrigin(options.origin) } : {}) }, options);
+  }
+
+  respondApproval(taskId, runId, approvalRequestId, choice, options = {}) {
+    if (!['once', 'session', 'always', 'deny'].includes(choice)) return Promise.reject(new TypeError('Invalid approval choice'));
+    return this.controlRequest('task.approval.respond', { taskId: requireClientId(taskId, 'taskId'), runId: requireClientId(runId, 'runId'), approvalRequestId: requireClientId(approvalRequestId, 'approvalRequestId'), choice }, options);
+  }
+
+  reportPostResult(receipt, result) {
+    if (this.session?.protocolVersion < 8) throw new Error('Discussion delivery requires protocol v8.');
+    this.send({ type: 'discussion.post.result', id: this.createRequestId(), receipt, ...result });
   }
 
   reportPlayback(active, microphoneActive = false) {
@@ -707,6 +719,15 @@ export class HermesLiveClient {
         this.setState("ready");
         this.updateSnapshot({ session: message, lastError: undefined });
         break;
+      case 'task.approval.resolved': {
+        if (message.requestId && this.pendingRequests.has(message.requestId)) {
+          const pending = this.requirePendingRequest(message.requestId, 'task.approval.respond');
+          if (message.state !== 'resolved' || ['taskId', 'runId', 'approvalRequestId', 'choice'].some(key => message[key] !== pending[key])) throw new Error('Approval confirmation does not match the requested command.');
+          this.pendingRequests.delete(message.requestId);
+          this.emitter.emit('request.succeeded', { requestId: message.requestId, request: pending, response: message });
+        }
+        break;
+      }
       case 'session.mode.changed':
       case 'session.context.changed': {
         const { type: _type, requestId, ...fields } = message;
@@ -1631,6 +1652,22 @@ export function validateServerMessage(value) {
   }
   const message = value;
   switch (message.type) {
+      case 'task.approval.requested':
+      requireOnlyKeys(message, ['type', 'taskId', 'runId', 'approvalRequestId', 'command', 'description', 'choices', 'requestedAt']);
+      requireOpaqueId(message, 'taskId'); requireOpaqueId(message, 'runId'); requireOpaqueId(message, 'approvalRequestId');
+      if (typeof message.command !== 'string' || message.command.length > 8000 || typeof message.description !== 'string' || message.description.length > 2000) throw new TypeError('Invalid approval text');
+      if (!Array.isArray(message.choices) || !message.choices.length || message.choices.length > 4 || message.choices.some(c => !['once', 'session', 'always', 'deny'].includes(c))) throw new TypeError('Invalid approval choices');
+      requireInteger(message, 'requestedAt', { minimum: 0 });
+      break;
+    case 'task.approval.resolved':
+      requireOnlyKeys(message, ['type', 'requestId', 'taskId', 'runId', 'approvalRequestId', 'state', 'choice']);
+      optionalOpaqueId(message, 'requestId', 128); requireOpaqueId(message, 'taskId'); requireOpaqueId(message, 'runId'); requireOpaqueId(message, 'approvalRequestId');
+      if (!['responding', 'resolved', 'expired'].includes(message.state) || (message.choice !== undefined && !['once', 'session', 'always', 'deny'].includes(message.choice))) throw new TypeError('Invalid approval resolution');
+      break;
+    case 'discussion.post.requested':
+      requireOnlyKeys(message, ['type', 'receipt', 'origin', 'text']); requireOpaqueId(message, 'receipt');
+      validateDiscordOrigin(message.origin); if (typeof message.text !== 'string' || !message.text.length || message.text.length > 6000) throw new TypeError('Invalid discussion text');
+      break;
     case 'session.mode.changed':
       requireOnlyKeys(message, ['type', 'requestId', 'interactionMode', 'discussionId', 'brainstormSupported', 'project', 'investigation', 'ongoingWork']);
       optionalOpaqueId(message, 'requestId', 128);
@@ -1646,16 +1683,16 @@ export function validateServerMessage(value) {
       validatePublicConversation(message.conversation);
       break;
     case "session.ready": {
-      requireOnlyKeys(message, ["type", "protocolVersion", "requestId", "sessionId", "model", "hermes", "realtime", "tasks", "conversation", "interactionMode", "discussionId", "brainstormSupported"]);
+      requireOnlyKeys(message, ["type", "protocolVersion", "requestId", "sessionId", "model", "hermes", "realtime", "tasks", "conversation", "interactionMode", "discussionId", "brainstormSupported", "interactiveApprovals"]);
       if (message.protocolVersion >= 7) {
         if (!['work', 'brainstorm'].includes(message.interactionMode)) throw new TypeError('Invalid interaction mode');
         requireOpaqueId(message, 'discussionId');
         if (typeof message.brainstormSupported !== 'boolean') throw new TypeError('Missing mode capability');
       }
       requireInteger(message, "protocolVersion", { positive: true, maximum: 1_000 });
-      if (![6, 7].includes(message.protocolVersion)) {
+      if (![6, 7, 8].includes(message.protocolVersion)) {
         throw new TypeError(
-          `Hermes Live protocol version ${message.protocolVersion} is not supported by this protocol v7 client. Upgrade the gateway and client together.`,
+          `Hermes Live protocol version ${message.protocolVersion} is not supported by this protocol v8 client. Upgrade the gateway and client together.`,
         );
       }
       optionalOpaqueId(message, "requestId", 128);
@@ -1814,7 +1851,7 @@ export function validateServerMessage(value) {
     default:
       if (message.type.startsWith("run.")) {
         throw new TypeError(
-          `Hermes Live received legacy protocol v2 message ${message.type}; this protocol v7 client accepts task.* lifecycle messages only.`,
+          `Hermes Live received legacy protocol v2 message ${message.type}; this protocol v8 client accepts task.* lifecycle messages only.`,
         );
       }
   }
@@ -2778,4 +2815,13 @@ function abortError() {
 
 function toError(value) {
   return value instanceof Error ? value : new Error(String(value));
+}
+
+function validateDiscordOrigin(value) {
+  if (!value || typeof value !== 'object') throw new TypeError('Discord origin is required');
+  requireOnlyKeys(value, ['guildId', 'userId', 'channelId', 'threadId']);
+  for (const name of ['guildId', 'userId', 'channelId', ...(value.threadId === undefined ? [] : ['threadId'])]) {
+    if (typeof value[name] !== 'string' || !/^\d{1,24}$/.test(value[name])) throw new TypeError('Invalid Discord origin');
+  }
+  return { ...value };
 }

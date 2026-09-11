@@ -1,5 +1,5 @@
-export const HERMES_LIVE_PROTOCOL_VERSION = 7 as const;
-export const HERMES_LIVE_SUPPORTED_PROTOCOL_VERSIONS = [3, 4, 5, 6, 7] as const;
+export const HERMES_LIVE_PROTOCOL_VERSION = 8 as const;
+export const HERMES_LIVE_SUPPORTED_PROTOCOL_VERSIONS = [3, 4, 5, 6, 7, 8] as const;
 
 export type HermesLiveProtocolVersion = (typeof HERMES_LIVE_SUPPORTED_PROTOCOL_VERSIONS)[number];
 

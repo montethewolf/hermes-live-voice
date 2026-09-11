@@ -22,7 +22,7 @@ const ALLOWED_TASK_TRANSITIONS: Readonly<Record<TaskStatus, ReadonlySet<TaskStat
   queued: new Set(["dispatching", "cancelled"]),
   dispatching: new Set(["queued", "running", "failed", "cancelled", "dispatch_unknown"]),
   running: new Set(["waiting_for_approval", "stopping", "completed", "failed", "cancelled", "unknown"]),
-  waiting_for_approval: new Set(["running", "stopping", "failed", "cancelled", "unknown"]),
+  waiting_for_approval: new Set(["running", "stopping", "completed", "failed", "cancelled", "unknown"]),
   stopping: new Set(["completed", "failed", "cancelled", "unknown"]),
   completed: new Set(),
   failed: new Set(),

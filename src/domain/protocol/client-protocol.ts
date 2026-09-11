@@ -67,6 +67,12 @@ export const ConversationSelectionSchema = z
   });
 export type ConversationSelection = z.infer<typeof ConversationSelectionSchema>;
 
+export const DiscordOriginSchema = z.object({
+  guildId: z.string().regex(/^\d{1,24}$/), userId: z.string().regex(/^\d{1,24}$/),
+  channelId: z.string().regex(/^\d{1,24}$/), threadId: z.string().regex(/^\d{1,24}$/).optional(),
+}).strict();
+export type DiscordOrigin = z.infer<typeof DiscordOriginSchema>;
+
 const SessionStartMessageSchema = z
   .object({
     type: z.literal("session.start"),
@@ -79,6 +85,7 @@ const SessionStartMessageSchema = z
     conversation: ConversationSelectionSchema.optional(),
     discussionId: ConversationIdSchema.optional(),
     interactionMode: z.enum(["work", "brainstorm"]).optional(),
+    origin: DiscordOriginSchema.optional(),
   })
   .strict();
 
@@ -169,10 +176,14 @@ export const ClientMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal('session.mode.set'), id: RequestIdSchema,
     interactionMode: z.enum(['work', 'brainstorm']).optional(), project: z.string().trim().min(1).max(256).optional() }).strict(),
   z.object({ type: z.literal('session.context.set'), id: RequestIdSchema,
-    discussionId: ConversationIdSchema, conversation: ConversationSelectionSchema }).strict(),
+    discussionId: ConversationIdSchema, conversation: ConversationSelectionSchema, origin: DiscordOriginSchema.optional() }).strict(),
   z.object({ type: z.literal('playback.state'), id: OptionalRequestIdSchema,
     active: z.boolean(), microphoneActive: z.boolean() }).strict(),
   z.object({ type: z.literal('context.input'), id: OptionalRequestIdSchema, text: z.string().min(1).max(20000) }).strict(),
+  z.object({ type: z.literal('task.approval.respond'), id: RequestIdSchema, taskId: TaskIdSchema,
+    runId: ConversationIdSchema, approvalRequestId: ConversationIdSchema, choice: ApprovalChoiceSchema }).strict(),
+  z.object({ type: z.literal('discussion.post.result'), id: RequestIdSchema, receipt: ConversationIdSchema,
+    ok: z.boolean(), messageId: z.string().regex(/^\d{1,24}$/).optional(), error: z.string().max(1000).optional() }).strict(),
   AudioInputMessageSchema,
   AudioEndMessageSchema,
   TextInputMessageSchema,
@@ -184,6 +195,7 @@ export const ClientMessageSchema = z.discriminatedUnion("type", [
   TaskNotificationAckMessageSchema,
   SessionCloseMessageSchema,
 ]).superRefine((message, context) => {
+  if (message.type === 'session.start' && message.protocolVersion < 8 && message.origin !== undefined) context.addIssue({ code: z.ZodIssueCode.custom, message: 'Discord origin requires protocol v8.' });
   if (message.type === 'session.start' && message.protocolVersion < 7 && (message.discussionId !== undefined || message.interactionMode !== undefined)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'Discussion modes require protocol v7.' });
   }

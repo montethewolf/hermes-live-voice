@@ -3,17 +3,22 @@ import type { HermesCapabilities, HermesRunsPort } from "./ports/hermes-runs.por
 export const HERMES_TARGETED_APPROVAL_FEATURE = "run_approval_response_by_id" as const;
 
 export interface HermesApprovalCompatibility {
-  uiSupported: false;
-  interactive: false;
-  fallback: "deny_all_then_stop";
-  requiredFeature: typeof HERMES_TARGETED_APPROVAL_FEATURE;
+  uiSupported: boolean;
+  interactive: boolean;
+  fallback: "deny_all_then_stop" | "deny_uncorrelated_request";
+  requiredFeature: typeof HERMES_TARGETED_APPROVAL_FEATURE | "run_approval_response";
   upstreamTargetedResponseAdvertised: boolean;
   negotiated: boolean;
 }
 
 export function hermesApprovalCompatibility(
   capabilities: Pick<HermesCapabilities, "features">,
+  protocolVersion = 4,
 ): HermesApprovalCompatibility {
+  if (protocolVersion >= 8 && capabilities.features?.run_approval_response === true && capabilities.features?.approval_events === true) {
+    return { uiSupported: true, interactive: true, fallback: 'deny_uncorrelated_request', requiredFeature: 'run_approval_response',
+      upstreamTargetedResponseAdvertised: capabilities.features?.[HERMES_TARGETED_APPROVAL_FEATURE] === true, negotiated: true };
+  }
   return approvalCompatibility(capabilities.features?.[HERMES_TARGETED_APPROVAL_FEATURE] === true, true);
 }
 
@@ -25,7 +30,7 @@ export async function negotiateHermesApprovalCompatibility(
   hermes: Pick<HermesRunsPort, "capabilities">,
 ): Promise<HermesApprovalCompatibility> {
   try {
-    return hermesApprovalCompatibility(await hermes.capabilities());
+    return hermesApprovalCompatibility(await hermes.capabilities(), 8);
   } catch {
     return unnegotiatedHermesApprovalCompatibility();
   }

@@ -4,6 +4,10 @@ export interface SubmitBackgroundTaskInput {
   ownerIdentity: string;
   backend?: 'work' | 'research';
   research?: TaskRecord['research'];
+  purpose?: TaskRecord['purpose'];
+  interactiveApprovals?: boolean;
+  selectedSessionId?: string;
+  origin?: TaskRecord['origin'];
   sessionKey: string;
   input: string;
   title?: string;
@@ -13,6 +17,8 @@ export interface SubmitBackgroundTaskInput {
 }
 
 export interface FollowUpBackgroundTaskInput {
+  interactiveApprovals?: boolean;
+  origin?: TaskRecord['origin'];
   ownerIdentity: string;
   ownerId: string;
   sessionKey: string;
@@ -34,6 +40,7 @@ export interface TaskNotificationAnnouncementClaim {
 export interface TaskSupervisorPort {
   registerOwner(ownerIdentity: string, sessionKey: string): string;
   submit(input: SubmitBackgroundTaskInput): Promise<TaskRecord>;
+  respondApproval?(ownerId: string, taskId: string, runId: string, requestId: string, choice: import('../../../domain/protocol/client-protocol.js').ApprovalChoice): Promise<TaskRecord>;
   followUp?(input: FollowUpBackgroundTaskInput): Promise<TaskRecord>;
   /** Recent owner history. Callers may request one extra record to compute truthful truncation. */
   list(ownerId: string, limit?: number): Promise<TaskRecord[]>;

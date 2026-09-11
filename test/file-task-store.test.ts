@@ -63,7 +63,7 @@ describe("FileTaskStore", () => {
     await expect(reloaded.load(task.taskId)).resolves.toEqual(task);
     await expect(reloaded.list({ ownerId: task.ownerId })).resolves.toEqual([task]);
     const raw = JSON.parse(await readFile(join(directory, "tasks-v1.json"), "utf8"));
-    expect(raw).toMatchObject({ schemaVersion: 1, tasks: [{ taskId: task.taskId }] });
+    expect(raw).toMatchObject({ schemaVersion: 2, tasks: [{ taskId: task.taskId }] });
     await reloaded.close();
     expect(root).toBeTruthy();
   });
