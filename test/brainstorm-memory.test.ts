@@ -80,6 +80,25 @@ it('stays conversational when research is unavailable and avoids an unrestricted
   expect(await brain.consult('Explain architecture')).toMatchObject({ ok: false });
   expect(brain.mode).toBe('brainstorm');
 });
+it('distinguishes unversioned live findings from changed repository evidence and preserves result time on reconnect', async () => {
+  const { brain, store } = await setup();
+  const raw = createTaskRecord({ ownerIdentity: 'owner', input: 'Find the Factory item', backend: 'work', purpose: 'consultation',
+    research: { discussionId: 'discussion_a', generation: 0, question: 'Find the Factory item' } });
+  const completed = transitionTask(transitionTask(transitionTask(raw, 'dispatching'), 'running', { runId: 'run' }), 'completed', { output: 'Factory issue #74 is not actionable.' });
+  await brain.receive(completed);
+  let finding = JSON.parse(brain.context()).findings[0];
+  expect(finding).toMatchObject({ repositoryEvidence: 'unversioned', taskUpdatedAt: completed.updatedAt });
+  expect(finding).not.toHaveProperty('evidenceCurrent');
+  const restored = (await new VoiceStateStore(store.path).get('owner', 'discussion_a')).discussion;
+  expect(restored.findings[0].taskUpdatedAt).toBe(completed.updatedAt);
+  await store.retainResearch({ ...completed, ownerId: 'offline-owner' });
+  expect((await store.get('offline-owner', 'discussion_a')).discussion.findings[0].taskUpdatedAt).toBe(completed.updatedAt);
+  restored.evidenceStamp = 'revision_b'; restored.findings[0].stamp = 'revision_a';
+  finding = JSON.parse(brain.context(restored)).findings[0];
+  expect(finding).toMatchObject({ repositoryEvidence: 'changed', evidenceCurrent: false });
+  restored.evidenceStamp = 'revision_a';
+  expect(JSON.parse(brain.context(restored)).findings[0]).toMatchObject({ repositoryEvidence: 'current', evidenceCurrent: true });
+});
 it('keeps an accepted Work handoff in its original discussion while context refresh overlaps focus', async () => {
   const { brain, registry } = await setup();
   let finish!: (value: { briefing: string; stamp: string }) => void;

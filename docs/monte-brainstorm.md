@@ -4,6 +4,8 @@ Protocol v8 adds project discovery, normal Hermes consultations and exact comman
 
 The discussion context includes a compact repository catalog (names, aliases, descriptions, paths, GitHub slugs and Factory associations). `list_projects` provides local discovery; consultations need no selected project. Small explicit actions retain Brainstorm; implementation requests still switch to Work. `post_discussion_message` uses trusted Discord origin metadata and a bridge delivery receipt.
 
+Findings without a Git revision stamp are labelled unversioned, rather than stale. Returned task update times remain in saved notes, and restored context includes the current time. Revision comparisons still identify changed repository evidence; a missing local stamp does not invalidate a live GitHub or Factory lookup.
+
 Approvals use the installed Hermes API's `request_id` contract. Pending approvals and queued commands survive reconnect; each response identifies the owner, task, run and request. The default is once. Commands are explained at a pause, and spoken consent must follow the prompt. Discord buttons provide the same choices. Legacy clients and uncorrelated approvals retain containment. Session grants retain Hermes's per-run approval scope; permanent grants require explicit consent.
 
 Task document v2 reads v1 records and preserves backend identity. Selected-session execution uses durable runs; consultation sessions remain independent. Existing scheduling rules apply. SDK controls are `respondApproval`, `reportPostResult`, and optional Discord origin on session/discussion selection. See the Monte Chat repository's `docs/natural-hermes.md` for deployment and rollback.

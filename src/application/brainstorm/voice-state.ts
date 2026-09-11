@@ -12,7 +12,7 @@ export const NotesSchema = z.object({
 }).strict().refine(n => Object.values(n).join('').length <= 6000, 'Notes exceed 6,000 characters');
 const DialogueSchema = z.object({ role: z.enum(['user', 'assistant']), text: z.string().max(20000), interrupted: z.boolean().optional(), itemId: z.string().optional() });
 const FindingSchema = z.object({ taskId: z.string(), project: z.string().optional(), generation: z.number(), question: z.string(),
-  summary: z.string().max(8000), stamp: z.string().optional(), delivered: z.boolean().default(false) });
+  summary: z.string().max(8000), stamp: z.string().optional(), taskUpdatedAt: z.number().int().nonnegative().optional(), delivered: z.boolean().default(false) });
 export const DiscussionSchema = z.object({
   project: z.string().optional(), generation: z.number().int().nonnegative().default(0),
   notes: NotesSchema.default({}), dialogue: z.array(DialogueSchema).max(20).default([]),
@@ -43,7 +43,7 @@ export class VoiceStateStore {
     await this.update(record.ownerId, tag.discussionId, d => {
       if (d.findings.some(f => f.taskId === record.taskId)) return;
       d.findings.push({ taskId: record.taskId, project: tag.project, generation: tag.generation, question: tag.question,
-        stamp: tag.stamp, summary: (record.output ?? `Investigation ${record.status}; verification unavailable. ${record.error ?? ''}`).slice(0, 8000), delivered: false });
+        stamp: tag.stamp, taskUpdatedAt: record.updatedAt, summary: (record.output ?? `Investigation ${record.status}; verification unavailable. ${record.error ?? ''}`).slice(0, 8000), delivered: false });
       d.findings = d.findings.slice(-20);
     });
   }

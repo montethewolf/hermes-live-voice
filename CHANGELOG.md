@@ -3,6 +3,7 @@
 ## 1.1.0-monte.3
 
 - Add protocol v8 project catalogs, local project discovery and project-free normal Hermes consultations.
+- Distinguish unversioned live findings from stale repository evidence and retain task update times across reconnects.
 - Preserve conversational Brainstorm during small requested actions and support focused Discord posting with delivery receipts.
 - Add exact command approvals through voice and client controls using Hermes request IDs, with durable pending state and replay protection.
 - Use durable runs for selected-session Work, retain legacy backend routing, and migrate task documents without losing accepted work.
